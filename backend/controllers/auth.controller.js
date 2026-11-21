@@ -64,9 +64,8 @@ const loginUser = async (req, res) => {
     });
 
     if (user && (await user.matchPassword(password))) {
-      // Set online status
-      user.isOnline = true;
-      await user.save();
+      // Set online status without triggering pre('save') password hash hook
+      await User.findByIdAndUpdate(user._id, { isOnline: true, lastSeen: Date.now() });
 
       res.json({
         success: true,

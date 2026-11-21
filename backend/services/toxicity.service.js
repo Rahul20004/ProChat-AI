@@ -12,10 +12,7 @@ const checkToxicity = async (text) => {
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
-      generationConfig: {
-        responseMimeType: 'application/json',
-      },
+      model: 'gemini-pro',
     });
 
     const prompt = `Analyze the following user chat message for toxicity (including harassment, abuse, severe profanity, hate speech, threats, sexual content, self-harm, or illegal activities).

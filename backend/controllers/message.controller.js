@@ -114,7 +114,7 @@ const sendMessage = async (req, res) => {
         let fallbackMessage = await Message.create({
           conversation: conversationId,
           sender: aiParticipant._id,
-          text: "I'm sorry, I encountered an issue processing your request. Please try again in a moment.",
+          text: `AI Error: ${aiError.message || 'Unknown error occurred'}`,
         });
         fallbackMessage = await Message.findById(fallbackMessage._id).populate('sender', 'username email avatar isAi');
         if (io) {
@@ -146,7 +146,60 @@ const getMessages = async (req, res) => {
   }
 };
 
+// @desc    Mark all messages in a conversation as read by the current user
+// @route   PUT /api/messages/read/:conversationId
+// @access  Private
+const markRead = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    // Update all messages in this conversation where the user hasn't read yet
+    await Message.updateMany(
+      {
+        conversation: conversationId,
+        sender: { $ne: req.user._id },
+        readBy: { $ne: req.user._id },
+      },
+      { $addToSet: { readBy: req.user._id } }
+    );
+    res.status(200).json({ success: true, message: 'Messages marked as read' });
+  } catch (error) {
+    console.error('Mark Read Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Get unread message counts for all conversations of the current user
+// @route   GET /api/messages/unread/counts
+// @access  Private
+const getUnreadCounts = async (req, res) => {
+  try {
+    // Find all conversations the user participates in
+    const conversations = await Conversation.find({
+      participants: { $elemMatch: { $eq: req.user._id } },
+    });
+
+    const counts = {};
+    for (const conv of conversations) {
+      const count = await Message.countDocuments({
+        conversation: conv._id,
+        sender: { $ne: req.user._id },
+        readBy: { $ne: req.user._id },
+      });
+      if (count > 0) {
+        counts[conv._id.toString()] = count;
+      }
+    }
+
+    res.status(200).json({ success: true, data: counts });
+  } catch (error) {
+    console.error('Get Unread Counts Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   sendMessage,
   getMessages,
+  markRead,
+  getUnreadCounts,
 };

@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect, useContext } from 'react';
+import React, { createContext, useState, useEffect, useContext, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import { useAuth } from './AuthContext';
 
@@ -7,7 +7,30 @@ const SocketContext = createContext();
 export const SocketProvider = ({ children }) => {
   const [socket, setSocket] = useState(null);
   const [onlineUsers, setOnlineUsers] = useState([]);
+  const [unreadCounts, setUnreadCounts] = useState({});
   const { user } = useAuth();
+
+  // Increment unread count for a specific conversation
+  const incrementUnread = useCallback((conversationId) => {
+    setUnreadCounts((prev) => ({
+      ...prev,
+      [conversationId]: (prev[conversationId] || 0) + 1,
+    }));
+  }, []);
+
+  // Clear unread count for a specific conversation (called when user opens it)
+  const clearUnread = useCallback((conversationId) => {
+    setUnreadCounts((prev) => {
+      const next = { ...prev };
+      delete next[conversationId];
+      return next;
+    });
+  }, []);
+
+  // Set full unread counts map (used on initial load from API)
+  const setUnreadMap = useCallback((counts) => {
+    setUnreadCounts(counts || {});
+  }, []);
 
   useEffect(() => {
     if (user && user.token) {
@@ -45,7 +68,16 @@ export const SocketProvider = ({ children }) => {
   }, [user]);
 
   return (
-    <SocketContext.Provider value={{ socket, onlineUsers }}>
+    <SocketContext.Provider
+      value={{
+        socket,
+        onlineUsers,
+        unreadCounts,
+        incrementUnread,
+        clearUnread,
+        setUnreadMap,
+      }}
+    >
       {children}
     </SocketContext.Provider>
   );

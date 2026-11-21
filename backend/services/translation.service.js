@@ -12,10 +12,7 @@ const translateMessage = async (text) => {
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
-      generationConfig: {
-        responseMimeType: 'application/json',
-      },
+      model: 'gemini-pro',
     });
 
     const prompt = `Translate the following chat message into the five languages listed below.

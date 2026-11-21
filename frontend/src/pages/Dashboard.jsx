@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
@@ -15,47 +15,83 @@ import {
   IoLanguage,
   IoCheckmark,
   IoCheckmarkDone,
+  IoChevronBack,
+  IoChatbubbleEllipsesOutline,
+  IoPeopleOutline,
+  IoSparkles,
 } from 'react-icons/io5';
 import Toast from '../components/Toast';
 
 const Dashboard = () => {
   const { user, logout } = useAuth();
-  const { socket, onlineUsers } = useSocket();
+  const { socket, onlineUsers, unreadCounts, incrementUnread, clearUnread, setUnreadMap } = useSocket();
   const navigate = useNavigate();
 
   // Component States
   const [conversations, setConversations] = useState([]);
+  const [allUsers, setAllUsers] = useState([]);
+  const [aiAssistant, setAiAssistant] = useState(null);
   const [activeChat, setActiveChat] = useState(null);
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState('chats'); // 'chats' | 'contacts'
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(true);
 
   // AI & Voice Features States
   const [smartReplies, setSmartReplies] = useState([]);
-  const [translationLangs, setTranslationLangs] = useState({}); // { [msgId]: langCode }
+  const [translationLangs, setTranslationLangs] = useState({});
   const [isRecording, setIsRecording] = useState(false);
   const [summary, setSummary] = useState(null);
   const [isSummaryLoading, setIsSummaryLoading] = useState(false);
+  const [isSending, setIsSending] = useState(false);
 
   // Status indicators
   const [isTyping, setIsTyping] = useState(false);
   const [otherUserTyping, setOtherUserTyping] = useState(false);
+  const [typingUsername, setTypingUsername] = useState('');
 
   // Alerts
   const [toast, setToast] = useState(null);
 
-  // Speech Recognition reference
+  // Refs
   const recognitionRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
 
-  // Fetch initial conversations list
+  // ─── Initial Data Load ───────────────────────────────────────────────────────
   useEffect(() => {
     fetchConversations();
+    fetchAllUsers();
+    fetchAiAssistant();
+    fetchUnreadCounts();
   }, []);
 
-  // Set up socket listener hooks when activeChat changes
+  // ─── Global Socket listener for new messages (unread count updates) ──────────
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleGlobalMessage = (newMessage) => {
+      // If the message is for a conversation we're NOT currently viewing, increment unread
+      if (newMessage.sender._id !== user._id) {
+        if (!activeChat || newMessage.conversation !== activeChat._id) {
+          incrementUnread(newMessage.conversation);
+        }
+      }
+      // Always refresh conversation list for last message preview
+      fetchConversations();
+    };
+
+    socket.on('message_received', handleGlobalMessage);
+
+    return () => {
+      socket.off('message_received', handleGlobalMessage);
+    };
+  }, [socket, activeChat, user._id, incrementUnread]);
+
+  // ─── Active Chat Socket Listeners ────────────────────────────────────────────
   useEffect(() => {
     if (!socket || !activeChat) return;
 
@@ -67,32 +103,41 @@ const Dashboard = () => {
     fetchSmartReplies(activeChat._id);
     fetchSummary(activeChat._id);
 
-    // Socket listeners
+    // Mark messages as read when opening a chat
+    markConversationRead(activeChat._id);
+
+    // Socket listeners for this specific chat
     const handleMessageReceived = (newMessage) => {
       if (newMessage.conversation === activeChat._id) {
-        setMessages((prev) => [...prev, newMessage]);
-        // Trigger read receipt
-        socket.emit('message_read', {
-          messageId: newMessage._id,
-          conversationId: activeChat._id,
-          readerId: user._id,
+        setMessages((prev) => {
+          // Prevent duplicate: check if message already exists
+          if (prev.some((m) => m._id === newMessage._id)) return prev;
+          return [...prev, newMessage];
         });
-        // Fetch new smart replies & updates summary
+        // Mark as read immediately since chat is open
+        if (newMessage.sender._id !== user._id) {
+          socket.emit('message_read', {
+            messageId: newMessage._id,
+            conversationId: activeChat._id,
+            readerId: user._id,
+          });
+        }
+        // Refresh smart replies
         fetchSmartReplies(activeChat._id);
       }
-      // Refresh chats list to update last message preview
-      fetchConversations();
     };
 
     const handleTyping = ({ conversationId, username }) => {
       if (conversationId === activeChat._id) {
         setOtherUserTyping(true);
+        setTypingUsername(username);
       }
     };
 
-    const handleStopTyping = ({ conversationId, username }) => {
+    const handleStopTyping = ({ conversationId }) => {
       if (conversationId === activeChat._id) {
         setOtherUserTyping(false);
+        setTypingUsername('');
       }
     };
 
@@ -119,15 +164,16 @@ const Dashboard = () => {
       socket.off('stop_typing_received', handleStopTyping);
       socket.off('message_read_received', handleReadReceipt);
       setOtherUserTyping(false);
+      setTypingUsername('');
     };
   }, [socket, activeChat]);
 
-  // Scroll to bottom helper
+  // ─── Auto-scroll to bottom ───────────────────────────────────────────────────
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, otherUserTyping]);
 
-  // Speech Recognition initializer
+  // ─── Speech Recognition ──────────────────────────────────────────────────────
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SpeechRecognition) {
@@ -158,6 +204,7 @@ const Dashboard = () => {
     }
   }, []);
 
+  // ─── Helper Functions ────────────────────────────────────────────────────────
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
   };
@@ -168,6 +215,33 @@ const Dashboard = () => {
       setConversations(data.data);
     } catch (err) {
       console.error('Fetch conversations error:', err);
+    }
+  };
+
+  const fetchAllUsers = async () => {
+    try {
+      const { data } = await API.get('/users');
+      setAllUsers(data.data);
+    } catch (err) {
+      console.error('Fetch all users error:', err);
+    }
+  };
+
+  const fetchAiAssistant = async () => {
+    try {
+      const { data } = await API.get('/users/ai-assistant');
+      setAiAssistant(data.data);
+    } catch (err) {
+      console.error('Fetch AI assistant error:', err);
+    }
+  };
+
+  const fetchUnreadCounts = async () => {
+    try {
+      const { data } = await API.get('/messages/unread/counts');
+      setUnreadMap(data.data);
+    } catch (err) {
+      console.error('Fetch unread counts error:', err);
     }
   };
 
@@ -186,6 +260,7 @@ const Dashboard = () => {
       setSmartReplies(data.data || []);
     } catch (err) {
       console.error('Fetch smart replies error:', err);
+      setSmartReplies([]);
     }
   };
 
@@ -198,10 +273,19 @@ const Dashboard = () => {
     }
   };
 
+  const markConversationRead = async (conversationId) => {
+    try {
+      await API.put(`/messages/read/${conversationId}`);
+      clearUnread(conversationId);
+    } catch (err) {
+      console.error('Mark read error:', err);
+    }
+  };
+
   const handleSearch = async (e) => {
     const query = e.target.value;
     setSearchTerm(query);
-    if (!query) {
+    if (!query.trim()) {
       setIsSearching(false);
       setSearchResults([]);
       return;
@@ -222,23 +306,37 @@ const Dashboard = () => {
       setActiveChat(data.data);
       setSearchTerm('');
       setIsSearching(false);
+      setMobileSidebarOpen(false);
       fetchConversations();
     } catch (err) {
       console.error('Start conversation error:', err);
+      showToast('Failed to start conversation', 'error');
     }
+  };
+
+  const openChat = (chat) => {
+    setActiveChat(chat);
+    setMobileSidebarOpen(false);
+    markConversationRead(chat._id);
   };
 
   const handleSend = async (textToSend) => {
     const text = textToSend || inputText;
-    if (!text.trim() || !activeChat) return;
+    if (!text.trim() || !activeChat || isSending) return;
 
     setInputText('');
     stopTypingSignal();
+    setIsSending(true);
 
     try {
-      await API.post('/messages', {
+      const { data } = await API.post('/messages', {
         conversationId: activeChat._id,
         text: text.trim(),
+      });
+      // Add the sent message to local state immediately from REST response
+      setMessages((prev) => {
+        if (prev.some((m) => m._id === data.data._id)) return prev;
+        return [...prev, data.data];
       });
       fetchConversations();
     } catch (err) {
@@ -248,6 +346,8 @@ const Dashboard = () => {
       } else {
         showToast('Failed to send message: ' + (err.response?.data?.message || err.message), 'error');
       }
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -261,16 +361,11 @@ const Dashboard = () => {
       socket.emit('typing', { conversationId: activeChat._id, username: user.username });
     }
 
-    // Debounce stop typing signal
-    const lastTypingTime = new Date().getTime();
-    const timerLength = 3000;
-    setTimeout(() => {
-      const timeNow = new Date().getTime();
-      const timeDiff = timeNow - lastTypingTime;
-      if (timeDiff >= timerLength && isTyping) {
-        stopTypingSignal();
-      }
-    }, timerLength);
+    // Clear previous timeout and set a new one
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      stopTypingSignal();
+    }, 3000);
   };
 
   const stopTypingSignal = () => {
@@ -278,11 +373,12 @@ const Dashboard = () => {
       socket.emit('stop_typing', { conversationId: activeChat._id, username: user.username });
     }
     setIsTyping(false);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
   };
 
   const toggleRecording = () => {
     if (!recognitionRef.current) {
-      showToast('Voice-to-Text is not supported on this browser version.', 'error');
+      showToast('Voice-to-Text is not supported on this browser.', 'error');
       return;
     }
 
@@ -301,10 +397,10 @@ const Dashboard = () => {
     try {
       const { data } = await API.post('/ai/summary', { conversationId: activeChat._id });
       setSummary(data.data);
-      showToast('AI Conversation Summary generated successfully!');
+      showToast('AI Conversation Summary generated!');
     } catch (err) {
       console.error('Summarize error:', err);
-      showToast('Failed to generate summary: ' + (err.response?.data?.message || err.message), 'error');
+      showToast('Failed to generate summary', 'error');
     } finally {
       setIsSummaryLoading(false);
     }
@@ -326,25 +422,57 @@ const Dashboard = () => {
     return onlineUsers.includes(userId);
   };
 
+  const formatTime = (dateStr) => {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffDays = Math.floor((now - date) / (1000 * 60 * 60 * 24));
+    if (diffDays === 0) {
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } else if (diffDays === 1) {
+      return 'Yesterday';
+    } else if (diffDays < 7) {
+      return date.toLocaleDateString([], { weekday: 'short' });
+    }
+    return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  };
+
+  // ─── Filtered users for contacts tab ─────────────────────────────────────────
+  const filteredContacts = searchTerm.trim()
+    ? searchResults
+    : allUsers;
+
+  // ─── RENDER ──────────────────────────────────────────────────────────────────
+
   return (
     <div className="flex h-screen w-screen bg-chatBg overflow-hidden font-sans">
-      {/* 1. SIDEBAR PANEL */}
-      <div className="flex flex-col w-96 border-r border-chatBorder bg-chatPanel">
-        {/* Sidebar Header */}
+      {/* ============================================================ */}
+      {/* 1. SIDEBAR PANEL                                             */}
+      {/* ============================================================ */}
+      <div
+        className={`flex flex-col w-full md:w-96 md:min-w-[384px] border-r border-chatBorder bg-chatPanel transition-transform duration-300 
+          ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+          ${mobileSidebarOpen ? 'absolute md:relative z-30 inset-0 md:inset-auto' : 'absolute md:relative'}
+        `}
+      >
+        {/* ──── Sidebar Header ──── */}
         <div className="flex items-center justify-between p-4 bg-chatSidebar border-b border-chatBorder">
           <div className="flex items-center gap-3 cursor-pointer" onClick={() => navigate('/profile')}>
-            <img
-              src={user.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${user.username}`}
-              alt="avatar"
-              className="h-10 w-10 rounded-full border border-chatBorder"
-            />
+            <div className="relative">
+              <img
+                src={user.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${user.username}`}
+                alt="avatar"
+                className="h-10 w-10 rounded-full border border-chatBorder object-cover"
+              />
+              <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-emerald-500 border-2 border-chatSidebar"></span>
+            </div>
             <div>
               <h2 className="text-sm font-semibold text-white leading-tight">{user.username}</h2>
-              <span className="text-xs text-chatAccent font-medium">Online</span>
+              <span className="text-[11px] text-chatAccent font-medium">Online</span>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1">
             <button
               onClick={() => navigate('/analytics')}
               title="AI Dashboard"
@@ -369,115 +497,277 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* Search Contacts */}
+        {/* ──── Search Bar ──── */}
         <div className="p-3 border-b border-chatBorder bg-chatPanel">
           <div className="relative flex items-center bg-chatSidebar rounded-xl px-3 py-2">
-            <IoSearchOutline className="text-chatMuted h-5 w-5 mr-2" />
+            <IoSearchOutline className="text-chatMuted h-5 w-5 mr-2 flex-shrink-0" />
             <input
+              id="search-users"
               type="text"
               placeholder="Search or start a new chat..."
               value={searchTerm}
               onChange={handleSearch}
               className="w-full bg-transparent text-sm text-white placeholder-chatMuted focus:outline-none"
             />
+            {searchTerm && (
+              <button
+                onClick={() => { setSearchTerm(''); setIsSearching(false); setSearchResults([]); }}
+                className="text-chatMuted hover:text-white ml-1 text-xs"
+              >
+                ✕
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Contacts or Conversation Stream List */}
+        {/* ──── Tab Toggle: Chats / Contacts ──── */}
+        <div className="flex border-b border-chatBorder bg-chatPanel">
+          <button
+            onClick={() => setSidebarTab('chats')}
+            className={`flex-1 py-2.5 text-xs font-semibold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${
+              sidebarTab === 'chats'
+                ? 'text-chatAccent border-b-2 border-chatAccent'
+                : 'text-chatMuted hover:text-white'
+            }`}
+          >
+            <IoChatbubbleEllipsesOutline className="h-3.5 w-3.5" /> Chats
+          </button>
+          <button
+            onClick={() => setSidebarTab('contacts')}
+            className={`flex-1 py-2.5 text-xs font-semibold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${
+              sidebarTab === 'contacts'
+                ? 'text-chatAccent border-b-2 border-chatAccent'
+                : 'text-chatMuted hover:text-white'
+            }`}
+          >
+            <IoPeopleOutline className="h-3.5 w-3.5" /> Contacts
+          </button>
+        </div>
+
+        {/* ──── Sidebar Content ──── */}
         <div className="flex-1 overflow-y-auto">
-          {isSearching ? (
-            <div className="p-2">
-              <h3 className="px-3 py-1 text-xs font-semibold text-chatMuted uppercase tracking-wider">
-                Search Results
-              </h3>
-              {searchResults.length > 0 ? (
-                searchResults.map((searchUser) => (
+          {sidebarTab === 'chats' ? (
+            /* ─── CHATS TAB ─── */
+            <div className="py-1">
+              {/* Pinned ProChat AI Contact */}
+              {aiAssistant && (
+                <div className="px-2 pt-2 pb-1">
                   <div
-                    key={searchUser._id}
-                    onClick={() => startConversation(searchUser._id)}
-                    className="flex items-center gap-3 p-3 rounded-xl mx-2 my-1 cursor-pointer hover:bg-chatActive transition-all"
+                    onClick={() => startConversation(aiAssistant._id)}
+                    className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all group hover:bg-chatActive/80 bg-gradient-to-r from-chatAccent/5 to-transparent border border-chatAccent/10 hover:border-chatAccent/30`}
                   >
-                    <img
-                      src={searchUser.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${searchUser.username}`}
-                      alt="avatar"
-                      className="h-11 w-11 rounded-full bg-chatSidebar"
-                    />
+                    <div className="relative">
+                      <img
+                        src={aiAssistant.avatar || 'https://api.dicebear.com/7.x/bottts/svg?seed=ProChatAI'}
+                        alt="ProChat AI"
+                        className="h-11 w-11 rounded-full bg-chatSidebar ai-glow-pulse"
+                      />
+                      <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full bg-chatAccent border-2 border-chatPanel"></span>
+                    </div>
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between">
-                        <h4 className="text-sm font-semibold text-white truncate">
-                          {searchUser.username}
-                        </h4>
-                        {searchUser.isAi && (
-                          <span className="text-[10px] bg-chatAccent/20 text-chatAccent px-1.5 py-0.5 rounded-full font-bold">
-                            AI
-                          </span>
-                        )}
+                      <div className="flex items-center gap-1.5">
+                        <h4 className="text-sm font-semibold text-white">ProChat AI</h4>
+                        <span className="text-[9px] bg-chatAccent/20 text-chatAccent px-1.5 py-0.5 rounded-full font-bold flex items-center gap-0.5">
+                          <IoSparkles className="h-2.5 w-2.5" /> AI
+                        </span>
                       </div>
-                      <p className="text-xs text-chatMuted truncate">{searchUser.email}</p>
+                      <p className="text-xs text-chatMuted truncate">Your intelligent AI assistant</p>
                     </div>
                   </div>
-                ))
+                </div>
+              )}
+
+              {/* Separator */}
+              {conversations.length > 0 && (
+                <div className="px-4 pt-2 pb-1">
+                  <span className="text-[10px] font-semibold text-chatMuted uppercase tracking-widest">
+                    Recent Chats
+                  </span>
+                </div>
+              )}
+
+              {/* Conversation List */}
+              {isSearching ? (
+                <div className="p-2">
+                  <h3 className="px-3 py-1 text-xs font-semibold text-chatMuted uppercase tracking-wider">
+                    Search Results
+                  </h3>
+                  {searchResults.length > 0 ? (
+                    searchResults.map((searchUser) => (
+                      <div
+                        key={searchUser._id}
+                        onClick={() => startConversation(searchUser._id)}
+                        className="flex items-center gap-3 p-3 rounded-xl mx-2 my-0.5 cursor-pointer hover:bg-chatActive transition-all"
+                      >
+                        <div className="relative">
+                          <img
+                            src={searchUser.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${searchUser.username}`}
+                            alt="avatar"
+                            className="h-11 w-11 rounded-full bg-chatSidebar"
+                          />
+                          {(isUserOnline(searchUser._id) || searchUser.isAi) && (
+                            <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-emerald-500 border-2 border-chatPanel"></span>
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <h4 className="text-sm font-semibold text-white truncate">{searchUser.username}</h4>
+                            {searchUser.isAi && (
+                              <span className="text-[10px] bg-chatAccent/20 text-chatAccent px-1.5 py-0.5 rounded-full font-bold">AI</span>
+                            )}
+                          </div>
+                          <p className="text-xs text-chatMuted truncate">{searchUser.email}</p>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="p-4 text-center text-sm text-chatMuted">No users found</div>
+                  )}
+                </div>
               ) : (
-                <div className="p-4 text-center text-sm text-chatMuted">No users found</div>
+                <>
+                  {conversations.length > 0 ? (
+                    conversations.map((chat) => {
+                      const participant = getParticipantDetails(chat);
+                      if (!participant) return null;
+                      const isOnline = isUserOnline(participant._id) || participant.isAi;
+                      const isActive = activeChat && activeChat._id === chat._id;
+                      const unread = unreadCounts[chat._id] || 0;
+
+                      return (
+                        <div
+                          key={chat._id}
+                          onClick={() => openChat(chat)}
+                          className={`flex items-center gap-3 p-3 rounded-xl mx-2 my-0.5 cursor-pointer transition-all ${
+                            isActive ? 'bg-chatActive' : 'hover:bg-chatSidebar/60'
+                          }`}
+                        >
+                          <div className="relative flex-shrink-0">
+                            <img
+                              src={participant.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${participant.username}`}
+                              alt="avatar"
+                              className={`h-12 w-12 rounded-full bg-chatSidebar ${participant.isAi ? 'ai-glow' : ''}`}
+                            />
+                            {isOnline && (
+                              <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full bg-emerald-500 border-2 border-chatPanel"></span>
+                            )}
+                          </div>
+
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between">
+                              <h4 className="text-sm font-semibold text-white truncate flex items-center gap-1.5">
+                                {participant.username}
+                                {participant.isAi && (
+                                  <span className="text-[9px] bg-chatAccent/20 text-chatAccent px-1.5 py-0.5 rounded-full font-bold">AI</span>
+                                )}
+                              </h4>
+                              <span className="text-[10px] text-chatMuted flex-shrink-0 ml-2">
+                                {chat.lastMessage ? formatTime(chat.lastMessage.createdAt) : ''}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between mt-0.5">
+                              <p className="text-xs text-chatMuted truncate pr-2">
+                                {chat.lastMessage
+                                  ? (chat.lastMessage.sender?.username === user.username ? 'You: ' : '') +
+                                    chat.lastMessage.text
+                                  : 'No messages yet'}
+                              </p>
+                              {unread > 0 && (
+                                <span className="flex-shrink-0 inline-flex items-center justify-center h-5 min-w-[20px] px-1 rounded-full bg-chatAccent text-white text-[10px] font-bold unread-badge">
+                                  {unread > 99 ? '99+' : unread}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="p-8 text-center text-sm text-chatMuted">
+                      <div className="text-3xl mb-3">💬</div>
+                      No conversations yet.
+                      <br />
+                      <span className="text-chatAccent">Search above</span> or click{' '}
+                      <span className="text-chatAccent">Contacts</span> to start chatting!
+                    </div>
+                  )}
+                </>
               )}
             </div>
           ) : (
-            <div className="py-2">
-              {conversations.length > 0 ? (
-                conversations.map((chat) => {
-                  const participant = getParticipantDetails(chat);
-                  if (!participant) return null;
-                  const isOnline = isUserOnline(participant._id) || participant.isAi;
-                  const isActive = activeChat && activeChat._id === chat._id;
-
-                  return (
-                    <div
-                      key={chat._id}
-                      onClick={() => setActiveChat(chat)}
-                      className={`flex items-center gap-3 p-3 rounded-xl mx-2 my-1 cursor-pointer transition-all ${
-                        isActive ? 'bg-chatActive' : 'hover:bg-chatSidebar/60'
-                      }`}
-                    >
-                      <div className="relative">
-                        <img
-                          src={participant.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${participant.username}`}
-                          alt="avatar"
-                          className="h-11 w-11 rounded-full bg-chatSidebar"
-                        />
-                        {isOnline && (
-                          <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full bg-chatAccent border border-chatPanel"></span>
-                        )}
-                      </div>
-
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between">
-                          <h4 className="text-sm font-semibold text-white truncate flex items-center gap-1.5">
-                            {participant.username}
-                            {participant.isAi && (
-                              <span className="text-[9px] bg-chatAccent/20 text-chatAccent px-1.5 py-0.5 rounded-full font-bold">
-                                AI
-                              </span>
-                            )}
-                          </h4>
-                          <span className="text-[10px] text-chatMuted">
-                            {chat.lastMessage
-                              ? new Date(chat.lastMessage.createdAt).toLocaleTimeString([], {
-                                  hour: '2-digit',
-                                  minute: '2-digit',
-                                })
-                              : ''}
-                          </span>
-                        </div>
-                        <p className="text-xs text-chatMuted truncate mt-0.5">
-                          {chat.lastMessage ? chat.lastMessage.text : 'No messages yet'}
-                        </p>
-                      </div>
+            /* ─── CONTACTS TAB ─── */
+            <div className="py-1">
+              {/* ProChat AI pinned at top of contacts too */}
+              {aiAssistant && (
+                <div className="px-2 pt-2 pb-1">
+                  <div
+                    onClick={() => startConversation(aiAssistant._id)}
+                    className="flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all group hover:bg-chatActive/80 bg-gradient-to-r from-chatAccent/5 to-transparent border border-chatAccent/10"
+                  >
+                    <div className="relative">
+                      <img
+                        src={aiAssistant.avatar || 'https://api.dicebear.com/7.x/bottts/svg?seed=ProChatAI'}
+                        alt="ProChat AI"
+                        className="h-11 w-11 rounded-full bg-chatSidebar ai-glow-pulse"
+                      />
+                      <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full bg-chatAccent border-2 border-chatPanel"></span>
                     </div>
-                  );
-                })
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <h4 className="text-sm font-semibold text-white">ProChat AI</h4>
+                        <span className="text-[9px] bg-chatAccent/20 text-chatAccent px-1.5 py-0.5 rounded-full font-bold flex items-center gap-0.5">
+                          <IoSparkles className="h-2.5 w-2.5" /> AI
+                        </span>
+                      </div>
+                      <p className="text-xs text-chatAccent">Always online • Powered by Gemini</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="px-4 pt-3 pb-1">
+                <span className="text-[10px] font-semibold text-chatMuted uppercase tracking-widest">
+                  All Contacts ({filteredContacts.filter(u => !u.isAi).length})
+                </span>
+              </div>
+
+              {filteredContacts.filter(u => !u.isAi).length > 0 ? (
+                filteredContacts
+                  .filter((u) => !u.isAi)
+                  .map((contact) => {
+                    const isOnline = isUserOnline(contact._id);
+                    return (
+                      <div
+                        key={contact._id}
+                        onClick={() => startConversation(contact._id)}
+                        className="flex items-center gap-3 p-3 rounded-xl mx-2 my-0.5 cursor-pointer hover:bg-chatActive transition-all"
+                      >
+                        <div className="relative flex-shrink-0">
+                          <img
+                            src={contact.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${contact.username}`}
+                            alt="avatar"
+                            className="h-11 w-11 rounded-full bg-chatSidebar"
+                          />
+                          {isOnline && (
+                            <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-emerald-500 border-2 border-chatPanel"></span>
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <h4 className="text-sm font-semibold text-white truncate">{contact.username}</h4>
+                          <p className="text-xs text-chatMuted truncate">
+                            {isOnline ? (
+                              <span className="text-emerald-400">Online</span>
+                            ) : (
+                              contact.email
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })
               ) : (
                 <div className="p-8 text-center text-sm text-chatMuted">
-                  No chat histories yet. Search above to find contacts or chat with ProChat AI!
+                  No contacts found.
                 </div>
               )}
             </div>
@@ -485,13 +775,22 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {/* 2. CHAT STREAM PANEL */}
+      {/* ============================================================ */}
+      {/* 2. CHAT PANEL                                                */}
+      {/* ============================================================ */}
       <div className="flex-1 flex flex-col bg-chatBg relative">
         {activeChat ? (
           <>
-            {/* Chat Panel Header */}
-            <div className="flex items-center justify-between p-4 bg-chatSidebar border-b border-chatBorder">
+            {/* ──── Chat Header ──── */}
+            <div className="flex items-center justify-between p-3 md:p-4 bg-chatSidebar border-b border-chatBorder">
               <div className="flex items-center gap-3">
+                {/* Mobile back button */}
+                <button
+                  onClick={() => { setMobileSidebarOpen(true); setActiveChat(null); }}
+                  className="md:hidden p-1.5 text-chatMuted hover:text-white rounded-full hover:bg-chatActive transition-all"
+                >
+                  <IoChevronBack className="h-5 w-5" />
+                </button>
                 <div className="relative">
                   <img
                     src={
@@ -499,28 +798,28 @@ const Dashboard = () => {
                       `https://api.dicebear.com/7.x/bottts/svg?seed=${getParticipantDetails(activeChat)?.username}`
                     }
                     alt="avatar"
-                    className="h-10 w-10 rounded-full"
+                    className={`h-10 w-10 rounded-full ${getParticipantDetails(activeChat)?.isAi ? 'ai-glow' : ''}`}
                   />
                   {(isUserOnline(getParticipantDetails(activeChat)?._id) ||
                     getParticipantDetails(activeChat)?.isAi) && (
-                    <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-chatAccent border border-chatSidebar"></span>
+                    <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-emerald-500 border-2 border-chatSidebar"></span>
                   )}
                 </div>
                 <div>
                   <h3 className="text-sm font-semibold text-white flex items-center gap-1.5">
                     {getParticipantDetails(activeChat)?.username}
                     {getParticipantDetails(activeChat)?.isAi && (
-                      <span className="text-[9px] bg-chatAccent/20 text-chatAccent px-1.5 py-0.5 rounded-full font-bold">
-                        AI
+                      <span className="text-[9px] bg-chatAccent/20 text-chatAccent px-1.5 py-0.5 rounded-full font-bold flex items-center gap-0.5">
+                        <IoSparkles className="h-2.5 w-2.5" /> AI
                       </span>
                     )}
                   </h3>
                   <p className="text-xs text-chatMuted">
                     {otherUserTyping
-                      ? 'typing...'
+                      ? <span className="text-chatAccent animate-pulse">{typingUsername || 'Someone'} is typing...</span>
                       : isUserOnline(getParticipantDetails(activeChat)?._id) ||
                         getParticipantDetails(activeChat)?.isAi
-                      ? 'Active now'
+                      ? <span className="text-emerald-400">Active now</span>
                       : 'Offline'}
                   </p>
                 </div>
@@ -531,8 +830,8 @@ const Dashboard = () => {
                 <button
                   onClick={handleSummarize}
                   disabled={isSummaryLoading}
-                  title="Generate Summary"
-                  className="flex items-center gap-1 px-3 py-1.5 rounded-xl border border-chatBorder text-xs text-chatAccent bg-chatSidebar hover:bg-chatActive font-medium transition-all disabled:opacity-50"
+                  title="Generate AI Summary"
+                  className="hidden sm:flex items-center gap-1 px-3 py-1.5 rounded-xl border border-chatBorder text-xs text-chatAccent bg-chatSidebar hover:bg-chatActive font-medium transition-all disabled:opacity-50"
                 >
                   <IoDocumentTextOutline className="h-4 w-4" />
                   {isSummaryLoading ? 'Summarizing...' : 'Summarize'}
@@ -540,30 +839,31 @@ const Dashboard = () => {
               </div>
             </div>
 
-            {/* Conversation Summary Drawer if generated */}
+            {/* ──── Conversation Summary ──── */}
             {summary && (
-              <div className="bg-chatSidebar/90 border-b border-chatBorder p-4 mx-4 my-2 rounded-xl text-xs glass-card">
+              <div className="bg-chatSidebar/90 border-b border-chatBorder p-4 mx-3 md:mx-4 my-2 rounded-xl text-xs glass-card msg-slide-in">
                 <div className="flex justify-between items-center mb-1.5">
-                  <span className="font-bold text-chatAccent uppercase tracking-wide">
-                    🤖 AI Conversation Summary
+                  <span className="font-bold text-chatAccent uppercase tracking-wide flex items-center gap-1">
+                    <IoSparkles className="h-3 w-3" /> AI Conversation Summary
                   </span>
-                  <button
-                    onClick={() => setSummary(null)}
-                    className="text-chatMuted hover:text-white"
-                  >
+                  <button onClick={() => setSummary(null)} className="text-chatMuted hover:text-white text-xs">
                     Dismiss
                   </button>
                 </div>
-                <div className="text-chatText whitespace-pre-line leading-relaxed">
-                  {summary.summaryText}
-                </div>
+                <div className="text-chatText whitespace-pre-line leading-relaxed">{summary.summaryText}</div>
               </div>
             )}
 
-            {/* Chat Message Scroll */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-chatBg bg-chat-pattern bg-repeat">
+            {/* ──── Messages Scroll Area ──── */}
+            <div className="flex-1 overflow-y-auto p-3 md:p-4 space-y-3 bg-chatBg">
+              {messages.length === 0 && (
+                <div className="flex flex-col items-center justify-center h-full text-chatMuted text-sm">
+                  <div className="text-4xl mb-3">👋</div>
+                  <p>Start the conversation! Send your first message.</p>
+                </div>
+              )}
               {messages.map((msg) => {
-                const isSelf = msg.sender._id === user._id;
+                const isSelf = msg.sender?._id === user._id;
                 const activeLang = translationLangs[msg._id] || 'original';
                 const messageText =
                   activeLang === 'original'
@@ -573,19 +873,30 @@ const Dashboard = () => {
                 return (
                   <div
                     key={msg._id}
-                    className={`flex flex-col max-w-[70%] ${isSelf ? 'ml-auto items-end' : 'mr-auto items-start'}`}
+                    className={`flex flex-col max-w-[80%] md:max-w-[70%] msg-slide-in ${
+                      isSelf ? 'ml-auto items-end' : 'mr-auto items-start'
+                    }`}
                   >
+                    {/* Sender name for received messages */}
+                    {!isSelf && msg.sender?.isAi && (
+                      <span className="text-[10px] text-chatAccent font-semibold mb-0.5 px-1 flex items-center gap-0.5">
+                        <IoSparkles className="h-2.5 w-2.5" /> ProChat AI
+                      </span>
+                    )}
+
                     <div
                       className={`relative px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
                         isSelf
-                          ? 'bg-chatBubbleSelf text-white rounded-tr-none'
-                          : 'bg-chatBubbleOther text-chatText rounded-tl-none'
+                          ? 'bg-chatBubbleSelf text-white rounded-tr-sm'
+                          : msg.sender?.isAi
+                          ? 'bg-gradient-to-br from-chatBubbleOther to-chatActive/50 text-chatText rounded-tl-sm border border-chatAccent/10'
+                          : 'bg-chatBubbleOther text-chatText rounded-tl-sm'
                       }`}
                     >
-                      <p className="whitespace-pre-wrap">{messageText}</p>
+                      <p className="whitespace-pre-wrap break-words">{messageText}</p>
 
-                      {/* Small Info row (timestamp + ticks) */}
-                      <div className="flex items-center justify-end gap-1.5 mt-1.5 text-[9px] text-chatMuted">
+                      {/* Timestamp + Read receipt ticks */}
+                      <div className="flex items-center justify-end gap-1.5 mt-1.5 text-[9px] text-chatMuted/70">
                         <span>
                           {new Date(msg.createdAt).toLocaleTimeString([], {
                             hour: '2-digit',
@@ -595,7 +906,7 @@ const Dashboard = () => {
                         {isSelf && (
                           <span>
                             {msg.readBy && msg.readBy.length > 0 ? (
-                              <IoCheckmarkDone className="h-3.5 w-3.5 text-chatAccent" />
+                              <IoCheckmarkDone className="h-3.5 w-3.5 text-blue-400" />
                             ) : (
                               <IoCheckmark className="h-3.5 w-3.5 text-chatMuted" />
                             )}
@@ -604,7 +915,7 @@ const Dashboard = () => {
                       </div>
                     </div>
 
-                    {/* Translation Quick Lang Chips */}
+                    {/* Translation language pills */}
                     {!isSelf && msg.translations && (
                       <div className="flex items-center gap-1 mt-1 text-[10px] text-chatMuted px-1">
                         <IoLanguage className="h-3 w-3" />
@@ -632,26 +943,29 @@ const Dashboard = () => {
                   </div>
                 );
               })}
+
+              {/* Typing indicator */}
               {otherUserTyping && (
-                <div className="flex items-center gap-2 max-w-[70%] mr-auto">
-                  <div className="bg-chatBubbleOther text-chatMuted px-4 py-2.5 rounded-2xl rounded-tl-none text-xs flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 bg-chatMuted rounded-full animate-bounce"></span>
-                    <span className="w-1.5 h-1.5 bg-chatMuted rounded-full animate-bounce [animation-delay:0.2s]"></span>
-                    <span className="w-1.5 h-1.5 bg-chatMuted rounded-full animate-bounce [animation-delay:0.4s]"></span>
+                <div className="flex items-center gap-2 max-w-[70%] mr-auto msg-slide-in">
+                  <div className="bg-chatBubbleOther text-chatMuted px-4 py-3 rounded-2xl rounded-tl-sm text-xs flex items-center gap-1.5">
+                    <span className="w-2 h-2 bg-chatMuted rounded-full animate-bounce"></span>
+                    <span className="w-2 h-2 bg-chatMuted rounded-full animate-bounce [animation-delay:0.15s]"></span>
+                    <span className="w-2 h-2 bg-chatMuted rounded-full animate-bounce [animation-delay:0.3s]"></span>
                   </div>
                 </div>
               )}
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Smart replies picker panel */}
+            {/* ──── Smart Replies ──── */}
             {smartReplies.length > 0 && (
-              <div className="flex flex-wrap gap-2 px-4 py-2 bg-chatSidebar/20 border-t border-chatBorder">
+              <div className="flex flex-wrap gap-2 px-3 md:px-4 py-2 bg-chatSidebar/20 border-t border-chatBorder">
+                <IoSparkles className="h-3.5 w-3.5 text-chatAccent mt-1" />
                 {smartReplies.map((reply, i) => (
                   <button
                     key={i}
                     onClick={() => handleSend(reply)}
-                    className="px-3 py-1.5 rounded-full border border-chatAccent/30 bg-chatActive/40 hover:bg-chatActive text-xs text-chatAccent font-medium transition-all"
+                    className="px-3 py-1.5 rounded-full border border-chatAccent/30 bg-chatActive/40 hover:bg-chatActive text-xs text-chatAccent font-medium transition-all hover:scale-[1.03] active:scale-95"
                   >
                     {reply}
                   </button>
@@ -659,12 +973,12 @@ const Dashboard = () => {
               </div>
             )}
 
-            {/* Input Send Area */}
-            <div className="p-3 bg-chatSidebar border-t border-chatBorder flex items-center gap-3">
+            {/* ──── Message Input Area ──── */}
+            <div className="p-3 bg-chatSidebar border-t border-chatBorder flex items-center gap-2 md:gap-3">
               <button
                 onClick={toggleRecording}
                 title={isRecording ? 'Stop Voice-to-Text' : 'Start Voice-to-Text'}
-                className={`p-3 rounded-full hover:bg-chatActive transition-all ${
+                className={`p-2.5 md:p-3 rounded-full hover:bg-chatActive transition-all flex-shrink-0 ${
                   isRecording ? 'text-rose-500 bg-rose-500/10 animate-pulse' : 'text-chatMuted'
                 }`}
               >
@@ -672,38 +986,60 @@ const Dashboard = () => {
               </button>
 
               <input
+                id="message-input"
                 type="text"
                 value={inputText}
                 onChange={handleTypingInput}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleSend();
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
                 }}
-                placeholder={isRecording ? 'Listening voice inputs...' : 'Type a message...'}
-                className="flex-1 rounded-xl bg-chatPanel border border-chatBorder py-3 px-4 text-sm text-white placeholder-chatMuted focus:outline-none"
+                placeholder={isRecording ? 'Listening...' : 'Type a message...'}
+                className="flex-1 rounded-xl bg-chatPanel border border-chatBorder py-3 px-4 text-sm text-white placeholder-chatMuted focus:outline-none focus:border-chatAccent/50 transition-colors"
               />
 
               <button
+                id="send-button"
                 onClick={() => handleSend()}
-                disabled={!inputText.trim()}
-                className="p-3 bg-chatAccent text-white rounded-xl hover:bg-opacity-90 active:scale-95 transition-all disabled:opacity-50 disabled:scale-100"
+                disabled={!inputText.trim() || isSending}
+                className="p-2.5 md:p-3 bg-chatAccent text-white rounded-xl hover:bg-chatAccent/90 active:scale-95 transition-all disabled:opacity-40 disabled:scale-100 flex-shrink-0"
               >
                 <IoSend className="h-4 w-4" />
               </button>
             </div>
           </>
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center p-8 bg-chatBg bg-chat-pattern bg-repeat text-center">
-            <div className="max-w-md p-6 rounded-2xl glass-card text-center">
-              <h1 className="text-4xl mb-4">💬</h1>
-              <h2 className="text-xl font-bold text-white mb-2">Welcome to ProChat AI</h2>
-              <p className="text-sm text-chatMuted leading-relaxed">
-                Connect and chat in real-time with family, friends, or consult the Gemini AI assistant directly for translation checks, quick smart replies, and conversation summaries.
+          /* ──── Empty State / Welcome ──── */
+          <div className="flex-1 flex flex-col items-center justify-center p-6 md:p-8 bg-chatBg text-center">
+            {/* Mobile: show sidebar button */}
+            <button
+              onClick={() => setMobileSidebarOpen(true)}
+              className="md:hidden mb-6 px-4 py-2 rounded-xl border border-chatBorder text-sm text-chatMuted hover:text-white hover:bg-chatActive transition-all"
+            >
+              ← Open Sidebar
+            </button>
+            <div className="max-w-md p-8 rounded-2xl glass-card text-center">
+              <div className="text-5xl mb-4">🚀</div>
+              <h2 className="text-2xl font-bold text-white mb-3">
+                Welcome to <span className="bg-gradient-to-r from-chatAccent to-blue-400 bg-clip-text text-transparent">ProChat AI</span>
+              </h2>
+              <p className="text-sm text-chatMuted leading-relaxed mb-4">
+                Send and receive messages in real-time. Chat with friends or consult ProChat AI for intelligent conversations, translations, smart replies, and conversation summaries.
               </p>
+              <div className="flex flex-wrap justify-center gap-2 text-[11px]">
+                <span className="px-3 py-1.5 rounded-full bg-chatActive/60 text-chatMuted border border-chatBorder">💬 Real-time Chat</span>
+                <span className="px-3 py-1.5 rounded-full bg-chatActive/60 text-chatMuted border border-chatBorder">🤖 AI Assistant</span>
+                <span className="px-3 py-1.5 rounded-full bg-chatActive/60 text-chatMuted border border-chatBorder">🌐 Translations</span>
+                <span className="px-3 py-1.5 rounded-full bg-chatActive/60 text-chatMuted border border-chatBorder">🛡️ Toxicity Filter</span>
+              </div>
             </div>
           </div>
         )}
       </div>
 
+      {/* ──── Toast Notifications ──── */}
       {toast && (
         <Toast
           message={toast.message}

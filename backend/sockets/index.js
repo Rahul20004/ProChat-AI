@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Message = require('../models/Message');
 
 // Map of online user ids to their active socket ids
 // Structure: { [userId]: [socketId1, socketId2, ...] }
@@ -70,8 +71,18 @@ const initSockets = (io) => {
       socket.to(conversationId).emit('stop_typing_received', { conversationId, username });
     });
 
-    // 4. Message Read receipt updates
+    // 4. Message Read receipt updates — persist to DB and broadcast
     socket.on('message_read', async ({ messageId, conversationId, readerId }) => {
+      try {
+        // Persist read status in database
+        if (messageId) {
+          await Message.findByIdAndUpdate(messageId, {
+            $addToSet: { readBy: readerId },
+          });
+        }
+      } catch (err) {
+        console.error('Error persisting message read:', err);
+      }
       socket.to(conversationId).emit('message_read_received', { messageId, readerId });
     });
 
