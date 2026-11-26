@@ -81,6 +81,9 @@ app.use('/api/users', userRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/conversations', conversationRoutes);
 app.use('/api/ai', aiRoutes);
+// Route aliases for backward compatibility and path prefix variations
+app.use('/api/api/ai', aiRoutes);
+app.use('/ai', aiRoutes);
 app.use('/api/analytics', analyticsRoutes);
 
 // Base Route

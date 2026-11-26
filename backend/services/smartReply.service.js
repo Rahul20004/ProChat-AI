@@ -12,7 +12,7 @@ const generateSmartReplies = async (messages = []) => {
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
+      model: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
       generationConfig: {
         responseMimeType: 'application/json',
       },
@@ -40,7 +40,12 @@ Example Output:
     const responseText = result.response.text().trim();
 
     try {
-      const suggestions = JSON.parse(responseText);
+      const cleaned = responseText
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+      const suggestions = JSON.parse(cleaned);
       if (Array.isArray(suggestions)) {
         return suggestions.slice(0, 3);
       }

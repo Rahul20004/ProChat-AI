@@ -12,7 +12,7 @@ const checkToxicity = async (text) => {
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-pro',
+      model: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
     });
 
     const prompt = `Analyze the following user chat message for toxicity (including harassment, abuse, severe profanity, hate speech, threats, sexual content, self-harm, or illegal activities).
@@ -28,7 +28,12 @@ Message to analyze: "${text.replace(/"/g, '\\"')}"`;
     const responseText = result.response.text().trim();
     
     try {
-      const evaluation = JSON.parse(responseText);
+      const cleaned = responseText
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+      const evaluation = JSON.parse(cleaned);
       return {
         isToxic: !!evaluation.isToxic,
         reason: evaluation.reason || '',

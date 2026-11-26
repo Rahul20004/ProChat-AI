@@ -1,22 +1,49 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-// Check if Gemini API key exists
-if (!process.env.GEMINI_API_KEY) {
-  console.warn('WARNING: GEMINI_API_KEY is not defined in environment variables.');
+function getApiKey() {
+  return process.env.GEMINI_API_KEY;
 }
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || 'dummy-key');
+function getModelName() {
+  return process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+}
+
+function getGenAI() {
+  const key = getApiKey();
+  if (!key) {
+    console.warn('WARNING: GEMINI_API_KEY is not defined in environment variables.');
+  }
+  return new GoogleGenerativeAI(key || 'dummy-key');
+}
+
+// Dynamic proxy to support existing imports of { genAI } without stale API key
+const genAI = new Proxy({}, {
+  get(target, prop) {
+    const instance = getGenAI();
+    const value = instance[prop];
+    return typeof value === 'function' ? value.bind(instance) : value;
+  }
+});
 
 /**
- * Generate a chat response using Gemini
+ * Generate a chat response using Gemini (AI Assistant)
  * @param {string} prompt - The user's input message
  * @param {Array} history - Previous messages for conversation history/context
  * @returns {Promise<string>} - The model's response
  */
 const generateResponse = async (prompt, history = []) => {
   try {
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-pro',
+    const key = getApiKey();
+    if (!key) {
+      const err = new Error('Gemini API key is not configured.');
+      err.status = 401;
+      err.code = 'AUTH_ERROR';
+      throw err;
+    }
+
+    const client = getGenAI();
+    const model = client.getGenerativeModel({
+      model: getModelName(),
       generationConfig: {
         maxOutputTokens: 1000,
         temperature: 0.7,
@@ -24,7 +51,6 @@ const generateResponse = async (prompt, history = []) => {
     });
 
     // Format chat history for Gemini API
-    // Gemini history format is: [ { role: 'user' | 'model', parts: [{ text: string }] } ]
     const formattedHistory = [
       {
         role: 'user',
@@ -38,7 +64,6 @@ const generateResponse = async (prompt, history = []) => {
 
     // Append context-aware history
     history.forEach((msg) => {
-      // Avoid system-level instructions in regular message history formatting
       if (msg.sender && msg.text) {
         formattedHistory.push({
           role: msg.role === 'model' ? 'model' : 'user',
@@ -55,12 +80,14 @@ const generateResponse = async (prompt, history = []) => {
     const response = await result.response;
     return response.text().trim();
   } catch (error) {
-    console.error('Gemini Service Error:', error);
-    throw new Error(`AI generation failed: ${error.message}`);
+    console.error('Gemini Service Error:', error.message);
+    throw error;
   }
 };
 
 module.exports = {
   genAI,
+  getGenAI,
+  getModelName,
   generateResponse,
 };

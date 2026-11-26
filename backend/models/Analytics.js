@@ -24,6 +24,30 @@ const analyticsSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    geminiRequestsCount: {
+      type: Number,
+      default: 0,
+    },
+    fallbackRequestsCount: {
+      type: Number,
+      default: 0,
+    },
+    cacheHitsCount: {
+      type: Number,
+      default: 0,
+    },
+    quotaErrorsCount: {
+      type: Number,
+      default: 0,
+    },
+    totalAiResponseTimeMs: {
+      type: Number,
+      default: 0,
+    },
+    aiSuccessCount: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true,

@@ -19,8 +19,13 @@ import {
   IoChatbubbleEllipsesOutline,
   IoPeopleOutline,
   IoSparkles,
+  IoClose,
 } from 'react-icons/io5';
+import { Reply } from 'lucide-react';
 import Toast from '../components/Toast';
+import ContextMenu from '../components/ContextMenu';
+import TranslateModal from '../components/TranslateModal';
+import SummarizeModal from '../components/SummarizeModal';
 
 const Dashboard = () => {
   const { user, logout } = useAuth();
@@ -56,10 +61,30 @@ const Dashboard = () => {
   // Alerts
   const [toast, setToast] = useState(null);
 
+  // Context Menu & Modal States for Messages
+  const [contextMenu, setContextMenu] = useState({
+    isOpen: false,
+    x: 0,
+    y: 0,
+    message: null,
+  });
+  const [translateModal, setTranslateModal] = useState({
+    isOpen: false,
+    message: null,
+  });
+  const [summarizeModal, setSummarizeModal] = useState({
+    isOpen: false,
+    message: null,
+  });
+  const [replyToMessage, setReplyToMessage] = useState(null);
+
   // Refs
   const recognitionRef = useRef(null);
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
+  const touchTimerRef = useRef(null);
+  const touchStartPosRef = useRef({ x: 0, y: 0 });
+  const messageInputRef = useRef(null);
 
   // ─── Initial Data Load ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -321,8 +346,18 @@ const Dashboard = () => {
   };
 
   const handleSend = async (textToSend) => {
-    const text = textToSend || inputText;
+    let text = textToSend || inputText;
     if (!text.trim() || !activeChat || isSending) return;
+
+    if (replyToMessage) {
+      const senderName = replyToMessage.sender?.username || 'User';
+      const quoted =
+        replyToMessage.text.length > 70
+          ? replyToMessage.text.slice(0, 67) + '...'
+          : replyToMessage.text;
+      text = `> Replying to @${senderName}: "${quoted}"\n\n${text.trim()}`;
+      setReplyToMessage(null);
+    }
 
     setInputText('');
     stopTypingSignal();
@@ -411,6 +446,95 @@ const Dashboard = () => {
       ...prev,
       [msgId]: langCode,
     }));
+  };
+
+  // ─── Custom Message Context Menu & Actions ──────────────────────────────────
+  const handleMessageContextMenu = (e, msg) => {
+    if (!msg || !msg.text) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    setContextMenu({
+      isOpen: true,
+      x: e.clientX,
+      y: e.clientY,
+      message: msg,
+    });
+  };
+
+  const handleMessageTouchStart = (e, msg) => {
+    if (!msg || !msg.text) return;
+    const touch = e.touches[0];
+    touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
+
+    if (touchTimerRef.current) clearTimeout(touchTimerRef.current);
+    touchTimerRef.current = setTimeout(() => {
+      if (typeof window !== 'undefined' && window.navigator && window.navigator.vibrate) {
+        try {
+          window.navigator.vibrate(40);
+        } catch (vErr) {
+          // ignore vibration error if not permitted
+        }
+      }
+      setContextMenu({
+        isOpen: true,
+        x: touchStartPosRef.current.x,
+        y: touchStartPosRef.current.y,
+        message: msg,
+      });
+    }, 500);
+  };
+
+  const handleMessageTouchMove = (e) => {
+    if (touchTimerRef.current && e.touches[0]) {
+      const moveX = Math.abs(e.touches[0].clientX - touchStartPosRef.current.x);
+      const moveY = Math.abs(e.touches[0].clientY - touchStartPosRef.current.y);
+      if (moveX > 10 || moveY > 10) {
+        clearTimeout(touchTimerRef.current);
+        touchTimerRef.current = null;
+      }
+    }
+  };
+
+  const handleMessageTouchEnd = () => {
+    if (touchTimerRef.current) {
+      clearTimeout(touchTimerRef.current);
+      touchTimerRef.current = null;
+    }
+  };
+
+  const handleCloseContextMenu = () => {
+    setContextMenu((prev) => ({ ...prev, isOpen: false }));
+  };
+
+  const handleTranslateFromMenu = () => {
+    if (!contextMenu.message) return;
+    setTranslateModal({
+      isOpen: true,
+      message: contextMenu.message,
+    });
+  };
+
+  const handleSummarizeFromMenu = () => {
+    if (!contextMenu.message) return;
+    setSummarizeModal({
+      isOpen: true,
+      message: contextMenu.message,
+    });
+  };
+
+  const handleCopyFromMenu = () => {
+    if (!contextMenu.message) return;
+    navigator.clipboard.writeText(contextMenu.message.text);
+    showToast('Message copied to clipboard!', 'success');
+  };
+
+  const handleReplyFromMenu = () => {
+    if (!contextMenu.message) return;
+    setReplyToMessage(contextMenu.message);
+    setTimeout(() => {
+      messageInputRef.current?.focus();
+    }, 50);
   };
 
   const getParticipantDetails = (chat) => {
@@ -885,14 +1009,43 @@ const Dashboard = () => {
                     )}
 
                     <div
-                      className={`relative px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
+                      onContextMenu={(e) => handleMessageContextMenu(e, msg)}
+                      onTouchStart={(e) => handleMessageTouchStart(e, msg)}
+                      onTouchMove={handleMessageTouchMove}
+                      onTouchEnd={handleMessageTouchEnd}
+                      className={`group relative px-4 py-2.5 rounded-2xl text-sm leading-relaxed cursor-pointer select-text transition-all ${
                         isSelf
-                          ? 'bg-chatBubbleSelf text-white rounded-tr-sm'
+                          ? 'bg-chatBubbleSelf text-white rounded-tr-sm hover:brightness-105'
                           : msg.sender?.isAi
-                          ? 'bg-gradient-to-br from-chatBubbleOther to-chatActive/50 text-chatText rounded-tl-sm border border-chatAccent/10'
-                          : 'bg-chatBubbleOther text-chatText rounded-tl-sm'
+                          ? 'bg-gradient-to-br from-chatBubbleOther to-chatActive/50 text-chatText rounded-tl-sm border border-chatAccent/10 hover:border-chatAccent/30'
+                          : 'bg-chatBubbleOther text-chatText rounded-tl-sm hover:brightness-105'
                       }`}
                     >
+                      {/* Context menu trigger button on hover */}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          setContextMenu({
+                            isOpen: true,
+                            x: rect.left,
+                            y: rect.bottom + 4,
+                            message: msg,
+                          });
+                        }}
+                        title="Message options"
+                        className={`absolute top-1.5 ${
+                          isSelf ? 'left-1.5' : 'right-1.5'
+                        } opacity-0 group-hover:opacity-100 p-1 rounded-md bg-black/40 hover:bg-black/60 text-[#8696a0] hover:text-white transition-opacity`}
+                      >
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                          <circle cx="12" cy="5" r="1.5" fill="currentColor" />
+                          <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+                          <circle cx="12" cy="19" r="1.5" fill="currentColor" />
+                        </svg>
+                      </button>
+
                       <p className="whitespace-pre-wrap break-words">{messageText}</p>
 
                       {/* Timestamp + Read receipt ticks */}
@@ -973,6 +1126,27 @@ const Dashboard = () => {
               </div>
             )}
 
+            {/* ──── Replying Banner ──── */}
+            {replyToMessage && (
+              <div className="flex items-center justify-between px-4 py-2 bg-[#182229] border-t border-[#222e35] text-xs transition-all">
+                <div className="flex items-center gap-2 overflow-hidden flex-1 mr-2">
+                  <Reply className="w-3.5 h-3.5 text-[#00a884] flex-shrink-0" />
+                  <div className="truncate">
+                    <span className="font-semibold text-[#00a884]">
+                      Replying to {replyToMessage.sender?.username || 'User'}:
+                    </span>{' '}
+                    <span className="text-[#8696a0] truncate">{replyToMessage.text}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setReplyToMessage(null)}
+                  className="p-1 text-[#8696a0] hover:text-white rounded-full hover:bg-[#222e35]"
+                >
+                  <IoClose className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
             {/* ──── Message Input Area ──── */}
             <div className="p-3 bg-chatSidebar border-t border-chatBorder flex items-center gap-2 md:gap-3">
               <button
@@ -986,6 +1160,7 @@ const Dashboard = () => {
               </button>
 
               <input
+                ref={messageInputRef}
                 id="message-input"
                 type="text"
                 value={inputText}
@@ -996,7 +1171,7 @@ const Dashboard = () => {
                     handleSend();
                   }
                 }}
-                placeholder={isRecording ? 'Listening...' : 'Type a message...'}
+                placeholder={replyToMessage ? 'Type your reply...' : isRecording ? 'Listening...' : 'Type a message...'}
                 className="flex-1 rounded-xl bg-chatPanel border border-chatBorder py-3 px-4 text-sm text-white placeholder-chatMuted focus:outline-none focus:border-chatAccent/50 transition-colors"
               />
 
@@ -1038,6 +1213,35 @@ const Dashboard = () => {
           </div>
         )}
       </div>
+
+      {/* ──── Custom Right-Click Context Menu ──── */}
+      <ContextMenu
+        isOpen={contextMenu.isOpen}
+        x={contextMenu.x}
+        y={contextMenu.y}
+        message={contextMenu.message}
+        onClose={handleCloseContextMenu}
+        onTranslate={handleTranslateFromMenu}
+        onSummarize={handleSummarizeFromMenu}
+        onCopy={handleCopyFromMenu}
+        onReply={handleReplyFromMenu}
+      />
+
+      {/* ──── Translate Message Modal ──── */}
+      <TranslateModal
+        isOpen={translateModal.isOpen}
+        message={translateModal.message}
+        onClose={() => setTranslateModal({ isOpen: false, message: null })}
+        onShowToast={showToast}
+      />
+
+      {/* ──── Summarize Message Modal ──── */}
+      <SummarizeModal
+        isOpen={summarizeModal.isOpen}
+        message={summarizeModal.message}
+        onClose={() => setSummarizeModal({ isOpen: false, message: null })}
+        onShowToast={showToast}
+      />
 
       {/* ──── Toast Notifications ──── */}
       {toast && (
