@@ -39,11 +39,123 @@ function calculateEngagement(messages) {
   return { chatTimeMinutes: totalMinutes, formattedTime };
 }
 
+/**
+ * Compute top chat engagement contacts for a user filtered by period or date range.
+ * Primary ranking by active chat time (chatTimeMinutes descending).
+ */
+async function computeTopEngagement(currentUserId, { period = '7days', startDate = null, endDate = null }) {
+  const now = new Date();
+  let dateQuery = {};
+
+  if (period === '7days') {
+    const start = new Date(now);
+    start.setDate(now.getDate() - 7);
+    start.setHours(0, 0, 0, 0);
+    dateQuery.createdAt = { $gte: start };
+  } else if (period === '30days') {
+    const start = new Date(now);
+    start.setDate(now.getDate() - 30);
+    start.setHours(0, 0, 0, 0);
+    dateQuery.createdAt = { $gte: start };
+  } else if (period === 'custom' && (startDate || endDate)) {
+    dateQuery.createdAt = {};
+    if (startDate) {
+      const s = new Date(startDate);
+      s.setHours(0, 0, 0, 0);
+      dateQuery.createdAt.$gte = s;
+    }
+    if (endDate) {
+      const e = new Date(endDate);
+      e.setHours(23, 59, 59, 999);
+      dateQuery.createdAt.$lte = e;
+    }
+  }
+  // If period === 'all', dateQuery is empty (complete historical data)
+
+  let targetConversations = [];
+  if (currentUserId) {
+    targetConversations = await Conversation.find({ participants: currentUserId })
+      .populate('participants', 'username avatar isAi');
+  }
+
+  // Fallback to platform-wide top conversations if user has no personal chats
+  if (!targetConversations || targetConversations.length === 0) {
+    targetConversations = await Conversation.find()
+      .populate('participants', 'username avatar isAi');
+  }
+
+  const engagementMap = new Map();
+
+  for (const conv of targetConversations) {
+    // Find the contact relative to current user, or the non-AI participant
+    let contact = null;
+    if (currentUserId) {
+      contact = conv.participants.find((p) => p._id.toString() !== currentUserId.toString());
+    }
+    if (!contact && conv.participants.length > 0) {
+      contact = conv.participants.find((p) => !p.isAi) || conv.participants[0];
+    }
+    if (!contact) continue;
+
+    const msgs = await Message.find({ conversation: conv._id, ...dateQuery }).select('createdAt');
+    if (msgs.length === 0) continue;
+
+    const { chatTimeMinutes, formattedTime } = calculateEngagement(msgs);
+    const contactKey = contact._id.toString();
+
+    if (engagementMap.has(contactKey)) {
+      const existing = engagementMap.get(contactKey);
+      const combinedMinutes = existing.chatTimeMinutes + chatTimeMinutes;
+      let combinedFormatted = `${combinedMinutes}m`;
+      if (combinedMinutes >= 60) {
+        const h = Math.floor(combinedMinutes / 60);
+        const m = combinedMinutes % 60;
+        combinedFormatted = m > 0 ? `${h}h ${m}m` : `${h}h`;
+      }
+      engagementMap.set(contactKey, {
+        contact: existing.contact,
+        messagesExchanged: existing.messagesExchanged + msgs.length,
+        chatTimeMinutes: combinedMinutes,
+        estimatedChatTime: combinedFormatted,
+      });
+    } else {
+      engagementMap.set(contactKey, {
+        contact: {
+          _id: contact._id,
+          username: contact.username,
+          avatar: contact.avatar,
+          isAi: contact.isAi || false,
+        },
+        messagesExchanged: msgs.length,
+        chatTimeMinutes,
+        estimatedChatTime: formattedTime,
+      });
+    }
+  }
+
+  return Array.from(engagementMap.values())
+    .sort((a, b) => {
+      // Rank primarily by active chat time
+      if (b.chatTimeMinutes !== a.chatTimeMinutes) {
+        return b.chatTimeMinutes - a.chatTimeMinutes;
+      }
+      // Secondary tie breaker by message volume
+      return b.messagesExchanged - a.messagesExchanged;
+    })
+    .slice(0, 5)
+    .map((item, index) => ({
+      rank: index + 1,
+      ...item,
+    }));
+}
+
 // @desc    Get dashboard analytics numbers including AI safety, feature usage, and chat engagement
 // @route   GET /api/analytics
 // @access  Private
 const getDashboardStats = async (req, res) => {
   try {
+    const { period = '7days', startDate, endDate } = req.query;
+
     // 1. Total Registered Users (excluding AI Bot itself)
     const totalUsers = await User.countDocuments({ isAi: false });
 
@@ -161,7 +273,6 @@ const getDashboardStats = async (req, res) => {
       : '0.0';
 
     // 6. AI Feature Usage (Real usage metrics across all 4 AI features)
-    // - Translation: count of messages with non-empty translation
     const realTranslationsCount = await Message.countDocuments({
       $or: [
         { 'translations.hi': { $exists: true, $ne: '' } },
@@ -173,14 +284,10 @@ const getDashboardStats = async (req, res) => {
     });
     const translationCount = Math.max(realTranslationsCount, aiFeatureTransCount);
 
-    // - Summarization: count of summaries in Summary model
     const realSummariesCount = await Summary.countDocuments();
     const summarizationCount = Math.max(realSummariesCount, aiFeatureSummCount);
 
-    // - Smart Reply: AI bot message responses / smart replies
     const smartReplyCount = Math.max(totalAiMessages, aiFeatureSmartCount);
-
-    // - Toxicity Detection: Total messages processed through moderation
     const toxicityCount = Math.max(totalAnalyzed, aiFeatureToxCount);
 
     const rawAiUsage = [
@@ -205,7 +312,6 @@ const getDashboardStats = async (req, res) => {
       newUsers: record.newUsersCount || 0,
     }));
 
-    // If daily activity is empty, provide today's baseline so chart renders cleanly
     if (dailyActivity.length === 0 && totalMessages > 0) {
       const today = new Date().toISOString().split('T')[0];
       dailyActivity.push({
@@ -217,77 +323,8 @@ const getDashboardStats = async (req, res) => {
       });
     }
 
-    // 8. Top Chat Engagement (Activity-based tracking with 5-minute inactivity timeout)
-    const currentUserId = req.user?._id;
-    let targetConversations = [];
-
-    if (currentUserId) {
-      targetConversations = await Conversation.find({ participants: currentUserId })
-        .populate('participants', 'username avatar isAi');
-    }
-
-    // Fallback to platform-wide top conversations if user has no personal chats
-    if (!targetConversations || targetConversations.length === 0) {
-      targetConversations = await Conversation.find()
-        .populate('participants', 'username avatar isAi');
-    }
-
-    const engagementMap = new Map();
-
-    for (const conv of targetConversations) {
-      // Find the contact relative to current user, or the non-AI participant
-      let contact = null;
-      if (currentUserId) {
-        contact = conv.participants.find((p) => p._id.toString() !== currentUserId.toString());
-      }
-      if (!contact && conv.participants.length > 0) {
-        contact = conv.participants.find((p) => !p.isAi) || conv.participants[0];
-      }
-      if (!contact) continue;
-
-      const msgs = await Message.find({ conversation: conv._id }).select('createdAt');
-      if (msgs.length === 0) continue;
-
-      const { chatTimeMinutes, formattedTime } = calculateEngagement(msgs);
-      const contactKey = contact._id.toString();
-
-      if (engagementMap.has(contactKey)) {
-        const existing = engagementMap.get(contactKey);
-        const combinedMinutes = existing.chatTimeMinutes + chatTimeMinutes;
-        let combinedFormatted = `${combinedMinutes}m`;
-        if (combinedMinutes >= 60) {
-          const h = Math.floor(combinedMinutes / 60);
-          const m = combinedMinutes % 60;
-          combinedFormatted = m > 0 ? `${h}h ${m}m` : `${h}h`;
-        }
-        engagementMap.set(contactKey, {
-          contact: existing.contact,
-          messagesExchanged: existing.messagesExchanged + msgs.length,
-          chatTimeMinutes: combinedMinutes,
-          estimatedChatTime: combinedFormatted,
-        });
-      } else {
-        engagementMap.set(contactKey, {
-          contact: {
-            _id: contact._id,
-            username: contact.username,
-            avatar: contact.avatar,
-            isAi: contact.isAi || false,
-          },
-          messagesExchanged: msgs.length,
-          chatTimeMinutes,
-          estimatedChatTime: formattedTime,
-        });
-      }
-    }
-
-    const sortedEngagement = Array.from(engagementMap.values())
-      .sort((a, b) => b.messagesExchanged - a.messagesExchanged)
-      .slice(0, 5)
-      .map((item, index) => ({
-        rank: index + 1,
-        ...item,
-      }));
+    // 8. Top Chat Engagement (Filtered by selected period, ranked by active chat time)
+    const topChatEngagement = await computeTopEngagement(req.user?._id, { period, startDate, endDate });
 
     res.json({
       success: true,
@@ -296,9 +333,7 @@ const getDashboardStats = async (req, res) => {
         totalMessages,
         totalAiMessages,
         toxicMessagesBlocked: totalDetected,
-        // AI Feature Usage
         aiFeatureUsage,
-        // Toxicity & Safety Stats
         toxicityStats: {
           totalAnalyzed,
           totalDetected,
@@ -307,10 +342,9 @@ const getDashboardStats = async (req, res) => {
           categoriesBreakdown,
           falsePositiveCount: falsePositives,
         },
-        // Daily Activity
         dailyActivity,
-        // Top Chat Engagement
-        topChatEngagement: sortedEngagement,
+        topChatEngagement,
+        activePeriod: period,
       },
     });
   } catch (error) {
@@ -319,6 +353,32 @@ const getDashboardStats = async (req, res) => {
   }
 };
 
+// @desc    Get dynamic Top Chat Engagement filtered by period/date-range
+// @route   GET /api/analytics/engagement
+// @access  Private
+const getTopEngagementStats = async (req, res) => {
+  try {
+    const { period = '7days', startDate, endDate } = req.query;
+    const topChatEngagement = await computeTopEngagement(req.user?._id, { period, startDate, endDate });
+
+    res.json({
+      success: true,
+      data: {
+        period,
+        startDate: startDate || null,
+        endDate: endDate || null,
+        topChatEngagement,
+      },
+    });
+  } catch (error) {
+    console.error('Get Engagement Stats Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   getDashboardStats,
+  getTopEngagementStats,
+  computeTopEngagement,
+  calculateEngagement,
 };

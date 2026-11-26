@@ -11,9 +11,7 @@ import {
   IoFlameOutline,
   IoRefreshOutline,
   IoTimeOutline,
-  IoGlobeOutline,
-  IoDocumentTextOutline,
-  IoSparklesOutline,
+  IoCalendarOutline,
   IoAlertCircleOutline,
 } from 'react-icons/io5';
 import {
@@ -53,6 +51,14 @@ const Analytics = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState(null);
 
+  // Top Chat Engagement Filter States
+  const [period, setPeriod] = useState('7days'); // '7days' (default), '30days', 'all', 'custom'
+  const [customStart, setCustomStart] = useState('');
+  const [customEnd, setCustomEnd] = useState('');
+  const [showCustomPicker, setShowCustomPicker] = useState(false);
+  const [engagementData, setEngagementData] = useState([]);
+  const [engagementLoading, setEngagementLoading] = useState(false);
+
   useEffect(() => {
     fetchStats();
   }, []);
@@ -60,8 +66,15 @@ const Analytics = () => {
   const fetchStats = async (isManualRefresh = false) => {
     if (isManualRefresh) setRefreshing(true);
     try {
-      const { data } = await API.get('/analytics');
+      const { data } = await API.get('/analytics', {
+        params: {
+          period,
+          startDate: period === 'custom' ? customStart : undefined,
+          endDate: period === 'custom' ? customEnd : undefined,
+        },
+      });
       setStats(data.data);
+      setEngagementData(data.data.topChatEngagement || []);
       if (isManualRefresh) {
         setToast({ message: 'Analytics data refreshed successfully', type: 'success' });
       }
@@ -75,6 +88,52 @@ const Analytics = () => {
       setLoading(false);
       if (isManualRefresh) setRefreshing(false);
     }
+  };
+
+  const handlePeriodChange = async (newPeriod) => {
+    setPeriod(newPeriod);
+    if (newPeriod === 'custom') {
+      setShowCustomPicker(true);
+      if (customStart && customEnd) {
+        fetchEngagementOnly(newPeriod, customStart, customEnd);
+      }
+      return;
+    }
+    setShowCustomPicker(false);
+    fetchEngagementOnly(newPeriod);
+  };
+
+  const fetchEngagementOnly = async (selectedPeriod, start = null, end = null) => {
+    setEngagementLoading(true);
+    try {
+      const params = { period: selectedPeriod };
+      if (selectedPeriod === 'custom') {
+        if (start) params.startDate = start;
+        if (end) params.endDate = end;
+      }
+      const { data } = await API.get('/analytics/engagement', { params });
+      setEngagementData(data.data.topChatEngagement || []);
+    } catch (err) {
+      console.error('Fetch engagement error:', err);
+      setToast({
+        message: 'Failed to update engagement data: ' + (err.response?.data?.message || err.message),
+        type: 'error',
+      });
+    } finally {
+      setEngagementLoading(false);
+    }
+  };
+
+  const handleApplyCustomDates = () => {
+    if (!customStart || !customEnd) {
+      setToast({ message: 'Please select both start and end dates', type: 'warning' });
+      return;
+    }
+    if (new Date(customStart) > new Date(customEnd)) {
+      setToast({ message: 'Start date cannot be after end date', type: 'warning' });
+      return;
+    }
+    fetchEngagementOnly('custom', customStart, customEnd);
   };
 
   const statCards = [
@@ -118,7 +177,6 @@ const Analytics = () => {
   };
 
   const aiFeatures = stats?.aiFeatureUsage || [];
-  const topEngagement = stats?.topChatEngagement || [];
 
   return (
     <div className="flex flex-col min-h-screen w-full bg-[#111b21] text-[#e9edef] font-sans p-4 md:p-6 overflow-y-auto">
@@ -443,90 +501,162 @@ const Analytics = () => {
                 </div>
               </div>
 
-              {/* Card 2: Top Chat Engagement (Rank, Avatar, Name, Session Duration, Messages) */}
-              <div className="p-5 rounded-xl border border-[#222e35] bg-[#182229] space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-sm font-bold text-white tracking-wide flex items-center gap-2">
-                      <IoTimeOutline className="h-4 w-4 text-emerald-400" />
-                      Top Chat Engagement
-                    </h2>
-                    <p className="text-[11px] text-[#8696a0]">
-                      Active session durations (5-min inactivity timeout)
-                    </p>
+              {/* Card 2: Top Chat Engagement (With Dynamic Period Filter & Active Chat Time Ranking) */}
+              <div className="p-5 rounded-xl border border-[#222e35] bg-[#182229] space-y-3 flex flex-col justify-between">
+                <div>
+                  {/* Title & Filter Row */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-2.5 border-b border-[#222e35]">
+                    <div>
+                      <h2 className="text-sm font-bold text-white tracking-wide flex items-center gap-2">
+                        <IoTimeOutline className="h-4 w-4 text-emerald-400" />
+                        Top Chat Engagement
+                      </h2>
+                      <p className="text-[11px] text-[#8696a0]">
+                        Active sessions (5-min timeout) • Ranked by chat time
+                      </p>
+                    </div>
+
+                    {/* Filter Pills */}
+                    <div className="flex items-center gap-1 bg-[#111b21] p-1 rounded-lg border border-[#222e35] self-start sm:self-auto">
+                      {[
+                        { id: '7days', label: 'Last 7 Days' },
+                        { id: '30days', label: 'Last 30 Days' },
+                        { id: 'all', label: 'All Time' },
+                        { id: 'custom', label: 'Custom' },
+                      ].map((f) => (
+                        <button
+                          key={f.id}
+                          onClick={() => handlePeriodChange(f.id)}
+                          className={`px-2 py-0.5 text-[11px] rounded transition-all font-medium ${
+                            period === f.id
+                              ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-semibold shadow-sm'
+                              : 'text-[#8696a0] hover:text-[#e9edef] hover:bg-[#202c33]'
+                          }`}
+                        >
+                          {f.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <span className="text-[10px] text-[#8696a0] font-mono">Ranked by msgs</span>
-                </div>
 
-                <div className="space-y-2 pt-1">
-                  {topEngagement.length > 0 ? (
-                    topEngagement.map((item) => (
-                      <div
-                        key={item.rank}
-                        className="flex items-center justify-between p-2.5 rounded-lg bg-[#111b21] border border-[#222e35] hover:border-[#374248] transition-colors text-xs"
-                      >
-                        {/* Rank & Contact Info */}
-                        <div className="flex items-center gap-2.5 truncate">
-                          <span
-                            className={`h-5 w-5 rounded-full flex items-center justify-center font-bold text-[10px] flex-shrink-0 ${
-                              item.rank === 1
-                                ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                                : item.rank === 2
-                                ? 'bg-slate-300/20 text-slate-300 border border-slate-300/30'
-                                : item.rank === 3
-                                ? 'bg-amber-700/20 text-amber-600 border border-amber-700/30'
-                                : 'bg-[#202c33] text-[#8696a0]'
-                            }`}
-                          >
-                            #{item.rank}
-                          </span>
-
-                          <img
-                            src={
-                              item.contact?.avatar ||
-                              `https://api.dicebear.com/7.x/bottts/svg?seed=${item.contact?.username || 'User'}`
-                            }
-                            alt={item.contact?.username}
-                            className="h-7 w-7 rounded-full object-cover border border-[#222e35] flex-shrink-0 bg-[#202c33]"
+                  {/* Custom Date Range Picker (shown when Custom is active) */}
+                  {showCustomPicker && (
+                    <div className="mt-2.5 p-2.5 rounded-lg bg-[#111b21] border border-[#222e35] flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap text-xs">
+                        <div className="flex items-center gap-1.5">
+                          <IoCalendarOutline className="h-3.5 w-3.5 text-emerald-400" />
+                          <span className="text-[10px] text-[#8696a0] uppercase font-semibold">From:</span>
+                          <input
+                            type="date"
+                            value={customStart}
+                            onChange={(e) => setCustomStart(e.target.value)}
+                            className="bg-[#182229] border border-[#222e35] rounded px-2 py-0.5 text-xs text-[#cfd9df] focus:border-emerald-500 focus:outline-none"
                           />
-
-                          <div className="truncate">
-                            <span className="font-semibold text-white text-[12px] truncate block">
-                              {item.contact?.username || 'Unknown'}
-                            </span>
-                          </div>
-
-                          {item.contact?.isAi && (
-                            <span className="px-1.5 py-0.2 rounded bg-purple-500/20 border border-purple-500/30 text-purple-300 text-[9px] font-semibold flex-shrink-0">
-                              AI Bot
-                            </span>
-                          )}
                         </div>
-
-                        {/* Engagement Metrics */}
-                        <div className="flex items-center gap-3 flex-shrink-0">
-                          <div className="text-right">
-                            <span className="text-[11px] font-bold text-emerald-400 flex items-center gap-1 justify-end">
-                              <IoTimeOutline className="h-3.5 w-3.5" />
-                              {item.estimatedChatTime}
-                            </span>
-                            <span className="text-[9px] text-[#8696a0] block">session time</span>
-                          </div>
-
-                          <div className="text-right min-w-[55px]">
-                            <span className="text-[11px] font-bold text-white px-2 py-0.5 rounded bg-white/5 border border-white/5">
-                              {item.messagesExchanged} msgs
-                            </span>
-                          </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-[#8696a0] uppercase font-semibold">To:</span>
+                          <input
+                            type="date"
+                            value={customEnd}
+                            onChange={(e) => setCustomEnd(e.target.value)}
+                            className="bg-[#182229] border border-[#222e35] rounded px-2 py-0.5 text-xs text-[#cfd9df] focus:border-emerald-500 focus:outline-none"
+                          />
                         </div>
                       </div>
-                    ))
-                  ) : (
-                    <div className="h-36 flex flex-col items-center justify-center border border-dashed border-[#222e35] rounded-lg text-[#8696a0] text-xs gap-1">
-                      <span>No active chat conversations found.</span>
-                      <span className="text-[10px]">Start messaging to see top engagement metrics!</span>
+                      <button
+                        onClick={handleApplyCustomDates}
+                        disabled={engagementLoading || !customStart || !customEnd}
+                        className="px-2.5 py-1 rounded bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold transition-colors disabled:opacity-50"
+                      >
+                        Apply
+                      </button>
                     </div>
                   )}
+
+                  {/* Contact List */}
+                  <div className="space-y-2 pt-2">
+                    {engagementLoading ? (
+                      <div className="h-36 flex flex-col items-center justify-center gap-2 text-[#8696a0] text-xs">
+                        <div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-500 border-t-transparent"></div>
+                        <span>Calculating session engagement...</span>
+                      </div>
+                    ) : engagementData.length > 0 ? (
+                      engagementData.map((item) => (
+                        <div
+                          key={item.rank}
+                          className="flex items-center justify-between p-2.5 rounded-lg bg-[#111b21] border border-[#222e35] hover:border-[#374248] transition-colors text-xs"
+                        >
+                          {/* Rank & Contact Info */}
+                          <div className="flex items-center gap-2.5 truncate">
+                            <span
+                              className={`h-5 w-5 rounded-full flex items-center justify-center font-bold text-[10px] flex-shrink-0 ${
+                                item.rank === 1
+                                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                                  : item.rank === 2
+                                  ? 'bg-slate-300/20 text-slate-300 border border-slate-300/30'
+                                  : item.rank === 3
+                                  ? 'bg-amber-700/20 text-amber-600 border border-amber-700/30'
+                                  : 'bg-[#202c33] text-[#8696a0]'
+                              }`}
+                            >
+                              #{item.rank}
+                            </span>
+
+                            <img
+                              src={
+                                item.contact?.avatar ||
+                                `https://api.dicebear.com/7.x/bottts/svg?seed=${item.contact?.username || 'User'}`
+                              }
+                              alt={item.contact?.username}
+                              className="h-7 w-7 rounded-full object-cover border border-[#222e35] flex-shrink-0 bg-[#202c33]"
+                            />
+
+                            <div className="truncate">
+                              <span className="font-semibold text-white text-[12px] truncate block">
+                                {item.contact?.username || 'Unknown'}
+                              </span>
+                            </div>
+
+                            {item.contact?.isAi && (
+                              <span className="px-1.5 py-0.2 rounded bg-purple-500/20 border border-purple-500/30 text-purple-300 text-[9px] font-semibold flex-shrink-0">
+                                AI Bot
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Engagement Metrics */}
+                          <div className="flex items-center gap-3 flex-shrink-0">
+                            <div className="text-right">
+                              <span className="text-[11px] font-bold text-emerald-400 flex items-center gap-1 justify-end">
+                                <IoTimeOutline className="h-3.5 w-3.5" />
+                                {item.estimatedChatTime}
+                              </span>
+                              <span className="text-[9px] text-[#8696a0] block">active time</span>
+                            </div>
+
+                            <div className="text-right min-w-[55px]">
+                              <span className="text-[11px] font-bold text-white px-2 py-0.5 rounded bg-white/5 border border-white/5">
+                                {item.messagesExchanged} msgs
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="h-32 flex flex-col items-center justify-center border border-dashed border-[#222e35] rounded-lg text-[#8696a0] text-xs gap-1 p-4 text-center">
+                        <span className="font-medium text-[#cfd9df]">No active chats found in this period.</span>
+                        <span className="text-[11px] text-[#8696a0]">
+                          Try selecting &apos;All Time&apos; or another date range to see historical engagement.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Footer hint */}
+                <div className="pt-2 border-t border-[#222e35]/60 flex items-center justify-between text-[10px] text-[#8696a0]">
+                  <span>Filter: <strong className="text-emerald-400 capitalize">{period === '7days' ? 'Last 7 Days' : period === '30days' ? 'Last 30 Days' : period === 'all' ? 'All Time' : 'Custom Range'}</strong></span>
+                  <span>5-min inactivity threshold</span>
                 </div>
               </div>
             </div>
