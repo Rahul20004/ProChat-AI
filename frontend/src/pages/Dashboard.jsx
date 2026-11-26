@@ -31,6 +31,7 @@ import ReplyPreview from '../components/ReplyPreview';
 import { parseReplyFromMessage } from '../utils/replyParser';
 import NotificationCenter from '../components/NotificationCenter';
 import SafetyAlertToast from '../components/SafetyAlertToast';
+import ConversationSummaryPanel from '../components/ConversationSummaryPanel';
 
 const Dashboard = () => {
   const { user, logout } = useAuth();
@@ -1190,19 +1191,12 @@ const Dashboard = () => {
               </div>
             </div>
 
-            {/* ──── Conversation Summary ──── */}
+            {/* ──── Conversation Summary Panel ──── */}
             {summary && (
-              <div className="bg-chatSidebar/90 border-b border-chatBorder p-4 mx-3 md:mx-4 my-2 rounded-xl text-xs glass-card msg-slide-in">
-                <div className="flex justify-between items-center mb-1.5">
-                  <span className="font-bold text-chatAccent uppercase tracking-wide flex items-center gap-1">
-                    <IoSparkles className="h-3 w-3" /> AI Conversation Summary
-                  </span>
-                  <button onClick={() => setSummary(null)} className="text-chatMuted hover:text-white text-xs">
-                    Dismiss
-                  </button>
-                </div>
-                <div className="text-chatText whitespace-pre-line leading-relaxed">{summary.summaryText}</div>
-              </div>
+              <ConversationSummaryPanel
+                summary={summary}
+                onDismiss={() => setSummary(null)}
+              />
             )}
 
             {/* ──── Messages Scroll Area ──── */}
