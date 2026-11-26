@@ -127,7 +127,7 @@ async function processAsyncToxicity({ message, conversationId, senderUser, io })
 // @route   POST /api/messages
 // @access  Private
 const sendMessage = async (req, res) => {
-  const { conversationId, text } = req.body;
+  const { conversationId, text, replyToId } = req.body;
 
   if (!conversationId || !text) {
     return res.status(400).json({ success: false, message: 'conversationId and text are required' });
@@ -143,11 +143,21 @@ const sendMessage = async (req, res) => {
       sender: req.user._id,
       text,
       translations,
+      replyTo: replyToId || null,
       isToxic: false,
     });
 
-    // Populate sender details for frontend usage
-    message = await Message.findById(message._id).populate('sender', 'username email avatar isAi');
+    // Populate sender & replyTo details for frontend usage
+    message = await Message.findById(message._id)
+      .populate('sender', 'username email avatar isAi')
+      .populate({
+        path: 'replyTo',
+        select: 'text sender isDeletedForEveryone',
+        populate: {
+          path: 'sender',
+          select: 'username email avatar isAi',
+        },
+      });
 
     // 3. Update Conversation's lastMessage reference
     await Conversation.findByIdAndUpdate(conversationId, {
@@ -253,6 +263,14 @@ const getMessages = async (req, res) => {
       deletedFor: { $ne: req.user._id },
     })
       .populate('sender', 'username email avatar isAi')
+      .populate({
+        path: 'replyTo',
+        select: 'text sender isDeletedForEveryone',
+        populate: {
+          path: 'sender',
+          select: 'username email avatar isAi',
+        },
+      })
       .sort({ createdAt: 1 });
 
     res.status(200).json({ success: true, data: messages });

@@ -27,6 +27,8 @@ import ContextMenu from '../components/ContextMenu';
 import TranslateModal from '../components/TranslateModal';
 import SummarizeModal from '../components/SummarizeModal';
 import DeleteMessageModal from '../components/DeleteMessageModal';
+import ReplyPreview from '../components/ReplyPreview';
+import { parseReplyFromMessage } from '../utils/replyParser';
 import NotificationCenter from '../components/NotificationCenter';
 import SafetyAlertToast from '../components/SafetyAlertToast';
 
@@ -428,15 +430,9 @@ const Dashboard = () => {
     let text = textToSend || inputText;
     if (!text.trim() || !activeChat || isSending) return;
 
-    if (replyToMessage) {
-      const senderName = replyToMessage.sender?.username || 'User';
-      const quoted =
-        replyToMessage.text.length > 70
-          ? replyToMessage.text.slice(0, 67) + '...'
-          : replyToMessage.text;
-      text = `> Replying to @${senderName}: "${quoted}"\n\n${text.trim()}`;
-      setReplyToMessage(null);
-    }
+    // Capture the target reply ID and reset reply bar
+    const replyId = replyToMessage ? replyToMessage._id : null;
+    setReplyToMessage(null);
 
     setInputText('');
     stopTypingSignal();
@@ -446,6 +442,7 @@ const Dashboard = () => {
       const { data } = await API.post('/messages', {
         conversationId: activeChat._id,
         text: text.trim(),
+        replyToId: replyId,
       });
       // Add the sent message to local state immediately from REST response
       setMessages((prev) => {
@@ -709,6 +706,36 @@ const Dashboard = () => {
     setTimeout(() => {
       setHighlightedMessageId(null);
     }, 4500);
+  };
+
+  const handleScrollToOriginalMessage = (originalId, originalText) => {
+    if (originalId) {
+      const el = document.getElementById(`message-${originalId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setHighlightedMessageId(originalId);
+        setTimeout(() => setHighlightedMessageId(null), 2500);
+        return;
+      }
+    }
+
+    // Fallback search by text in currently loaded messages (for legacy messages)
+    if (originalText && originalText !== 'Original message unavailable') {
+      const matched = messages.find(
+        (m) => m.text && m.text.trim().toLowerCase().includes(originalText.trim().toLowerCase())
+      );
+      if (matched) {
+        const el = document.getElementById(`message-${matched._id}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setHighlightedMessageId(matched._id);
+          setTimeout(() => setHighlightedMessageId(null), 2500);
+          return;
+        }
+      }
+    }
+
+    showToast('Original message unavailable', 'info');
   };
 
   const getParticipantDetails = (chat) => {
@@ -1189,10 +1216,12 @@ const Dashboard = () => {
               {messages.map((msg) => {
                 const isSelf = msg.sender?._id === user._id;
                 const activeLang = translationLangs[msg._id] || 'original';
+                const replyInfo = parseReplyFromMessage(msg);
+                const rawTextToDisplay = replyInfo.cleanText;
                 const messageText =
                   activeLang === 'original'
-                    ? msg.text
-                    : msg.translations?.[activeLang] || msg.text;
+                    ? rawTextToDisplay
+                    : msg.translations?.[activeLang] || rawTextToDisplay;
 
                 return (
                   <div
@@ -1222,7 +1251,7 @@ const Dashboard = () => {
                           : 'bg-chatBubbleOther text-chatText rounded-tl-sm hover:brightness-105'
                       } ${
                         highlightedMessageId === msg._id
-                          ? 'ring-2 ring-rose-500 shadow-[0_0_25px_rgba(244,63,94,0.45)] scale-[1.01]'
+                          ? 'ring-2 ring-[#00a884] shadow-[0_0_25px_rgba(0,168,132,0.6)] scale-[1.02]'
                           : ''
                       } ${
                         msg.isToxic && !isSelf
@@ -1267,6 +1296,15 @@ const Dashboard = () => {
                           <circle cx="12" cy="19" r="1.5" fill="currentColor" />
                         </svg>
                       </button>
+
+                      {/* Nested Reply Preview Component */}
+                      {replyInfo.hasReply && (
+                        <ReplyPreview
+                          replyInfo={replyInfo}
+                          isSelf={isSelf}
+                          onScrollToOriginal={handleScrollToOriginalMessage}
+                        />
+                      )}
 
                       <p className="whitespace-pre-wrap break-words">{messageText}</p>
 
