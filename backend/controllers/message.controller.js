@@ -247,7 +247,11 @@ const sendMessage = async (req, res) => {
 // @access  Private
 const getMessages = async (req, res) => {
   try {
-    const messages = await Message.find({ conversation: req.params.conversationId })
+    const messages = await Message.find({
+      conversation: req.params.conversationId,
+      isDeletedForEveryone: { $ne: true },
+      deletedFor: { $ne: req.user._id },
+    })
       .populate('sender', 'username email avatar isAi')
       .sort({ createdAt: 1 });
 
@@ -255,6 +259,125 @@ const getMessages = async (req, res) => {
   } catch (error) {
     console.error('Get Messages Error:', error);
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Delete message (Delete for me OR Delete for everyone)
+// @route   DELETE /api/messages/:id
+// @access  Private
+const deleteMessage = async (req, res) => {
+  const { id } = req.params;
+  const { deleteType = 'me' } = req.body;
+
+  try {
+    const message = await Message.findById(id);
+    if (!message) {
+      return res.status(404).json({ success: false, message: 'Message not found' });
+    }
+
+    // Security check: Validate conversation membership
+    const conversation = await Conversation.findById(message.conversation);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+
+    const isMember = conversation.participants.some(
+      (p) => p.toString() === req.user._id.toString()
+    );
+    if (!isMember) {
+      return res.status(403).json({ success: false, message: 'You are not a member of this conversation' });
+    }
+
+    if (deleteType === 'everyone') {
+      // Security check: Only author can delete for everyone
+      if (message.sender.toString() !== req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: 'Permission denied: Only the message sender can delete for everyone',
+        });
+      }
+
+      message.isDeletedForEveryone = true;
+      message.text = 'This message was deleted';
+      message.translations = { en: '', hi: '', fr: '', de: '', es: '' };
+      await message.save();
+
+      // Check if this was the lastMessage of the conversation
+      if (conversation.lastMessage && conversation.lastMessage.toString() === message._id.toString()) {
+        const prevMessage = await Message.findOne({
+          conversation: conversation._id,
+          isDeletedForEveryone: { $ne: true },
+        }).sort({ createdAt: -1 });
+
+        await Conversation.findByIdAndUpdate(conversation._id, {
+          lastMessage: prevMessage ? prevMessage._id : null,
+        });
+      }
+
+      // Synchronize deletion via Socket.io to the entire conversation room
+      const io = req.app.get('io');
+      if (io) {
+        io.to(message.conversation.toString()).emit('message_deleted', {
+          messageId: message._id,
+          conversationId: message.conversation,
+          deleteType: 'everyone',
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Message deleted for everyone',
+        data: { messageId: message._id, deleteType: 'everyone' },
+      });
+    } else {
+      // Delete for me
+      await Message.findByIdAndUpdate(message._id, {
+        $addToSet: { deletedFor: req.user._id },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Message deleted for you',
+        data: { messageId: message._id, deleteType: 'me' },
+      });
+    }
+  } catch (error) {
+    console.error('Delete Message Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Toggle pin status of a message
+// @route   PUT /api/messages/pin/:id
+// @access  Private
+const togglePinMessage = async (req, res) => {
+  try {
+    const message = await Message.findById(req.params.id);
+    if (!message) return res.status(404).json({ success: false, message: 'Message not found' });
+    message.isPinned = !message.isPinned;
+    await message.save();
+    res.status(200).json({ success: true, isPinned: message.isPinned });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// @desc    Toggle saved status of a message
+// @route   PUT /api/messages/save/:id
+// @access  Private
+const toggleSaveMessage = async (req, res) => {
+  try {
+    const message = await Message.findById(req.params.id);
+    if (!message) return res.status(404).json({ success: false, message: 'Message not found' });
+    const isSaved = message.savedBy?.some((u) => u.toString() === req.user._id.toString());
+    if (isSaved) {
+      await Message.findByIdAndUpdate(message._id, { $pull: { savedBy: req.user._id } });
+    } else {
+      await Message.findByIdAndUpdate(message._id, { $addToSet: { savedBy: req.user._id } });
+    }
+    res.status(200).json({ success: true, isSaved: !isSaved });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
@@ -310,6 +433,9 @@ const getUnreadCounts = async (req, res) => {
 module.exports = {
   sendMessage,
   getMessages,
+  deleteMessage,
+  togglePinMessage,
+  toggleSaveMessage,
   markRead,
   getUnreadCounts,
   processAsyncToxicity,

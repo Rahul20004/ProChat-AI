@@ -26,6 +26,7 @@ import Toast from '../components/Toast';
 import ContextMenu from '../components/ContextMenu';
 import TranslateModal from '../components/TranslateModal';
 import SummarizeModal from '../components/SummarizeModal';
+import DeleteMessageModal from '../components/DeleteMessageModal';
 import NotificationCenter from '../components/NotificationCenter';
 import SafetyAlertToast from '../components/SafetyAlertToast';
 
@@ -75,6 +76,10 @@ const Dashboard = () => {
     message: null,
   });
   const [summarizeModal, setSummarizeModal] = useState({
+    isOpen: false,
+    message: null,
+  });
+  const [deleteModal, setDeleteModal] = useState({
     isOpen: false,
     message: null,
   });
@@ -230,7 +235,15 @@ const Dashboard = () => {
       );
     };
 
+    const handleMessageDeleted = ({ messageId, conversationId }) => {
+      if (conversationId === activeChat._id) {
+        setMessages((prev) => prev.filter((m) => m._id !== messageId));
+      }
+      fetchConversations();
+    };
+
     socket.on('message_received', handleMessageReceived);
+    socket.on('message_deleted', handleMessageDeleted);
     socket.on('typing_received', handleTyping);
     socket.on('stop_typing_received', handleStopTyping);
     socket.on('message_read_received', handleReadReceipt);
@@ -238,6 +251,7 @@ const Dashboard = () => {
     return () => {
       socket.emit('leave_room', activeChat._id);
       socket.off('message_received', handleMessageReceived);
+      socket.off('message_deleted', handleMessageDeleted);
       socket.off('typing_received', handleTyping);
       socket.off('stop_typing_received', handleStopTyping);
       socket.off('message_read_received', handleReadReceipt);
@@ -600,6 +614,66 @@ const Dashboard = () => {
     setTimeout(() => {
       messageInputRef.current?.focus();
     }, 50);
+  };
+
+  const handleForwardFromMenu = () => {
+    if (!contextMenu.message) return;
+    setInputText(`Forwarded: "${contextMenu.message.text}"`);
+    showToast('Message text copied to input for forwarding', 'info');
+    setTimeout(() => {
+      messageInputRef.current?.focus();
+    }, 50);
+  };
+
+  const handlePinFromMenu = async () => {
+    if (!contextMenu.message) return;
+    try {
+      const { data } = await API.put(`/messages/pin/${contextMenu.message._id}`);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m._id === contextMenu.message._id ? { ...m, isPinned: data.isPinned } : m
+        )
+      );
+      showToast(data.isPinned ? 'Message pinned to chat' : 'Message unpinned', 'success');
+    } catch (err) {
+      showToast('Failed to toggle pin: ' + (err.response?.data?.message || err.message), 'error');
+    }
+  };
+
+  const handleSaveFromMenu = async () => {
+    if (!contextMenu.message) return;
+    try {
+      const { data } = await API.put(`/messages/save/${contextMenu.message._id}`);
+      showToast(data.isSaved ? 'Message saved to bookmarks' : 'Message removed from bookmarks', 'success');
+    } catch (err) {
+      showToast('Failed to toggle save: ' + (err.response?.data?.message || err.message), 'error');
+    }
+  };
+
+  const handleDeleteFromMenu = () => {
+    if (!contextMenu.message) return;
+    setDeleteModal({
+      isOpen: true,
+      message: contextMenu.message,
+    });
+  };
+
+  const handleConfirmDeleteMessage = async (deleteType) => {
+    if (!deleteModal.message) return;
+    const msgId = deleteModal.message._id;
+    try {
+      await API.delete(`/messages/${msgId}`, { data: { deleteType } });
+      setMessages((prev) => prev.filter((m) => m._id !== msgId));
+      fetchConversations();
+      showToast(
+        deleteType === 'everyone' ? 'Message deleted for everyone' : 'Message deleted for you',
+        'success'
+      );
+    } catch (err) {
+      console.error('Delete message error:', err);
+      showToast('Failed to delete message: ' + (err.response?.data?.message || err.message), 'error');
+      throw err;
+    }
   };
 
   const handleViewMessage = (notification) => {
@@ -1373,6 +1447,19 @@ const Dashboard = () => {
         onSummarize={handleSummarizeFromMenu}
         onCopy={handleCopyFromMenu}
         onReply={handleReplyFromMenu}
+        onForward={handleForwardFromMenu}
+        onPin={handlePinFromMenu}
+        onSave={handleSaveFromMenu}
+        onDelete={handleDeleteFromMenu}
+      />
+
+      {/* ──── Delete Message Modal ──── */}
+      <DeleteMessageModal
+        isOpen={deleteModal.isOpen}
+        onClose={() => setDeleteModal({ isOpen: false, message: null })}
+        message={deleteModal.message}
+        currentUser={user}
+        onConfirmDelete={handleConfirmDeleteMessage}
       />
 
       {/* ──── Translate Message Modal ──── */}
