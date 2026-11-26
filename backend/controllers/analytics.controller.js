@@ -1,8 +1,9 @@
 const User = require('../models/User');
 const Message = require('../models/Message');
 const Analytics = require('../models/Analytics');
+const Notification = require('../models/Notification');
 
-// @desc    Get dashboard analytics numbers
+// @desc    Get dashboard analytics numbers including AI toxicity moderation stats
 // @route   GET /api/analytics
 // @access  Private
 const getDashboardStats = async (req, res) => {
@@ -20,18 +21,80 @@ const getDashboardStats = async (req, res) => {
       totalAiMessages = await Message.countDocuments({ sender: aiUser._id });
     }
 
-    // 4. Toxic Messages Blocked
+    // 4. Historical Analytics Aggregation
     const analyticsRecords = await Analytics.find().sort({ date: 1 });
-    const toxicMessagesBlocked = analyticsRecords.reduce(
-      (sum, record) => sum + (record.toxicBlockedCount || 0),
-      0
-    );
+
+    // Sum totals from analytics records
+    let totalAnalyzed = 0;
+    let totalDetected = 0;
+    let highSeverity = 0;
+    let mediumSeverity = 0;
+    let lowSeverity = 0;
+    let falsePositives = 0;
+
+    let catAbusive = 0;
+    let catThreat = 0;
+    let catHate = 0;
+    let catHarass = 0;
+    let catSexual = 0;
+    let catInsult = 0;
+
+    analyticsRecords.forEach((r) => {
+      totalAnalyzed += (r.toxicAnalyzedCount || 0);
+      totalDetected += (r.toxicDetectedCount || 0) + (r.toxicBlockedCount || 0);
+      highSeverity += (r.severityHighCount || 0);
+      mediumSeverity += (r.severityMediumCount || 0);
+      lowSeverity += (r.severityLowCount || 0);
+      falsePositives += (r.falsePositiveFeedbackCount || 0);
+
+      catAbusive += (r.categoryAbusiveCount || 0);
+      catThreat += (r.categoryThreatCount || 0);
+      catHate += (r.categoryHateSpeechCount || 0);
+      catHarass += (r.categoryHarassmentCount || 0);
+      catSexual += (r.categorySexualCount || 0);
+      catInsult += (r.categoryInsultCount || 0);
+    });
+
+    // Cross-check real counts from Message collection to guarantee consistency
+    const realToxicMessagesCount = await Message.countDocuments({ isToxic: true });
+    if (realToxicMessagesCount > totalDetected) {
+      totalDetected = realToxicMessagesCount;
+    }
+    if (totalMessages > totalAnalyzed) {
+      totalAnalyzed = totalMessages;
+    }
+
+    // False positives from Notification collection
+    const realFalsePositives = await Notification.countDocuments({ feedback: 'false_positive' });
+    falsePositives = Math.max(falsePositives, realFalsePositives);
+
+    // Categories breakdown
+    const categoriesBreakdown = [
+      { name: 'Abusive Language', count: catAbusive },
+      { name: 'Threats / Violence', count: catThreat },
+      { name: 'Hate Speech', count: catHate },
+      { name: 'Harassment & Bullying', count: catHarass },
+      { name: 'Sexual Harassment', count: catSexual },
+      { name: 'Insults', count: catInsult },
+    ];
+
+    // Severity breakdown
+    const severityBreakdown = {
+      high: highSeverity,
+      medium: mediumSeverity,
+      low: lowSeverity,
+    };
+
+    // Calculate detection rate
+    const detectionRate = totalAnalyzed > 0
+      ? ((totalDetected / totalAnalyzed) * 100).toFixed(1)
+      : '0.0';
 
     // 5. Daily Activity (last 10 days for graph charts)
     const dailyActivity = analyticsRecords.slice(-10).map((record) => ({
       date: record.date,
       messages: record.messagesCount || 0,
-      toxicBlocked: record.toxicBlockedCount || 0,
+      toxicDetected: (record.toxicDetectedCount || 0) + (record.toxicBlockedCount || 0),
       aiQueries: record.aiConversationsCount || 0,
       newUsers: record.newUsersCount || 0,
     }));
@@ -42,7 +105,16 @@ const getDashboardStats = async (req, res) => {
         totalUsers,
         totalMessages,
         totalAiMessages,
-        toxicMessagesBlocked,
+        toxicMessagesBlocked: totalDetected,
+        // Toxicity & Safety Stats
+        toxicityStats: {
+          totalAnalyzed,
+          totalDetected,
+          detectionRate: `${detectionRate}%`,
+          severityBreakdown,
+          categoriesBreakdown,
+          falsePositiveCount: falsePositives,
+        },
         dailyActivity,
       },
     });

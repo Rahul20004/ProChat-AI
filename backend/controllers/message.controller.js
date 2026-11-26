@@ -2,11 +2,126 @@ const Message = require('../models/Message');
 const Conversation = require('../models/Conversation');
 const User = require('../models/User');
 const Analytics = require('../models/Analytics');
+const Notification = require('../models/Notification');
 
 // Import AI Services
 const { checkToxicity } = require('../services/toxicity.service');
 const { translateMessage } = require('../services/translation.service');
 const { generateResponse } = require('../services/gemini.service');
+
+/**
+ * Asynchronously analyze message toxicity without blocking real-time messaging latency
+ */
+async function processAsyncToxicity({ message, conversationId, senderUser, io }) {
+  try {
+    const text = message.text;
+    if (!text || text.trim() === '') return;
+
+    // 1. Fetch conversation participants to identify recipients
+    const conversation = await Conversation.findById(conversationId).populate('participants', 'username avatar isAi');
+    if (!conversation || !conversation.participants) return;
+
+    // Filter to human recipients only (exclude message sender and AI bot)
+    const recipients = conversation.participants.filter(
+      (p) => p._id.toString() !== senderUser._id.toString() && !p.isAi
+    );
+
+    // If there are no other human recipients (e.g. talking only to AI), skip
+    if (recipients.length === 0) return;
+
+    // 2. Increment messages analyzed count in Analytics
+    await Analytics.incrementCount('toxicAnalyzedCount');
+
+    // 3. Analyze text toxicity using Gemini AI service
+    const toxicity = await checkToxicity(text);
+
+    // 4. If toxic with sufficient confidence (Medium, High, or confidence >= 0.65)
+    if (toxicity.isToxic && toxicity.severity !== 'None' && toxicity.confidence >= 0.65) {
+      console.log(`[Safety System] Toxic message detected in conv ${conversationId} from ${senderUser.username}:`, {
+        category: toxicity.category,
+        severity: toxicity.severity,
+        confidence: toxicity.confidence,
+      });
+
+      // Update message in DB with toxicity flags
+      await Message.findByIdAndUpdate(message._id, {
+        isToxic: true,
+        toxicityCategory: toxicity.category,
+        toxicitySeverity: toxicity.severity,
+        toxicityConfidence: toxicity.confidence,
+        toxicityReason: toxicity.reason,
+      });
+
+      // Update Analytics counters
+      const increments = {
+        toxicDetectedCount: 1,
+      };
+      if (toxicity.severity === 'High') increments.severityHighCount = 1;
+      else if (toxicity.severity === 'Medium') increments.severityMediumCount = 1;
+      else if (toxicity.severity === 'Low') increments.severityLowCount = 1;
+
+      const catLower = (toxicity.category || '').toLowerCase();
+      if (catLower.includes('threat')) increments.categoryThreatCount = 1;
+      else if (catLower.includes('hate')) increments.categoryHateSpeechCount = 1;
+      else if (catLower.includes('sexual')) increments.categorySexualCount = 1;
+      else if (catLower.includes('harass') || catLower.includes('bully')) increments.categoryHarassmentCount = 1;
+      else if (catLower.includes('insult')) increments.categoryInsultCount = 1;
+      else increments.categoryAbusiveCount = 1;
+
+      await Analytics.incrementMultiple(increments);
+
+      // Create and deliver notification to each recipient
+      for (const recipient of recipients) {
+        // Prevent duplicate notification
+        const existing = await Notification.findOne({
+          recipient: recipient._id,
+          message: message._id,
+        });
+        if (existing) continue;
+
+        // Persist notification in MongoDB
+        const notif = await Notification.create({
+          recipient: recipient._id,
+          sender: senderUser._id,
+          message: message._id,
+          conversation: conversationId,
+          type: 'TOXIC_MESSAGE',
+          title: 'Toxic Message Detected',
+          category: toxicity.category,
+          severity: toxicity.severity,
+          confidence: toxicity.confidence,
+          reason: toxicity.reason,
+          messageSnippet: text.slice(0, 120),
+        });
+
+        const populatedNotif = await Notification.findById(notif._id)
+          .populate('sender', 'username avatar isAi')
+          .populate('recipient', 'username');
+
+        // Emit real-time notification to the receiver's private user room
+        if (io) {
+          io.to(`user_${recipient._id.toString()}`).emit('toxic_notification', populatedNotif);
+          console.log(`[Safety System] Emitted real-time safety alert to user_${recipient._id.toString()} for message ${message._id}`);
+        }
+      }
+
+      // Also notify the active room so clients can update the message UI
+      if (io) {
+        io.to(conversationId.toString()).emit('message_toxicity_updated', {
+          messageId: message._id,
+          conversationId,
+          isToxic: true,
+          toxicityCategory: toxicity.category,
+          toxicitySeverity: toxicity.severity,
+          toxicityConfidence: toxicity.confidence,
+          toxicityReason: toxicity.reason,
+        });
+      }
+    }
+  } catch (err) {
+    console.error('[Safety System Error] Asynchronous toxicity processing failed:', err.message);
+  }
+}
 
 // @desc    Send a message in a conversation
 // @route   POST /api/messages
@@ -19,49 +134,50 @@ const sendMessage = async (req, res) => {
   }
 
   try {
-    // 1. Toxicity Check
-    const toxicityResult = await checkToxicity(text);
-    if (toxicityResult.isToxic) {
-      // Log blocked toxic message in analytics
-      await Analytics.incrementCount('toxicBlockedCount');
-
-      return res.status(400).json({
-        success: false,
-        isToxic: true,
-        message: `Message blocked: ${toxicityResult.reason || 'Flagged for toxic content.'}`,
-      });
-    }
-
-    // 2. Generate Translations in Parallel
+    // 1. Generate Translations
     const translations = await translateMessage(text);
 
-    // 3. Create and save user message
+    // 2. Create and save user message immediately (non-blocking delivery)
     let message = await Message.create({
       conversation: conversationId,
       sender: req.user._id,
       text,
       translations,
+      isToxic: false,
     });
 
     // Populate sender details for frontend usage
     message = await Message.findById(message._id).populate('sender', 'username email avatar isAi');
 
-    // 4. Update Conversation's lastMessage reference
+    // 3. Update Conversation's lastMessage reference
     await Conversation.findByIdAndUpdate(conversationId, {
       lastMessage: message._id,
     });
 
-    // 5. Log message count in analytics
+    // 4. Log message count in analytics
     await Analytics.incrementCount('messagesCount');
 
-    // 6. Broadcast user message via Socket.io
+    // 5. Broadcast user message immediately via Socket.io
     const io = req.app.get('io');
     if (io) {
-      // Emit to conversation room
+      // Emit to conversation room for instant chat delivery
       io.to(conversationId.toString()).emit('message_received', message);
     }
 
-    // 7. Check if recipient is the AI Assistant
+    // 6. Return response to sender immediately (real-time chat latency remains sub-second)
+    res.status(201).json({ success: true, data: message });
+
+    // 7. Non-blocking asynchronous background analysis for toxicity & safety alerts
+    setImmediate(() => {
+      processAsyncToxicity({
+        message,
+        conversationId,
+        senderUser: req.user,
+        io,
+      });
+    });
+
+    // 8. Check if recipient is the AI Assistant
     const conversation = await Conversation.findById(conversationId).populate('participants');
     const aiParticipant = conversation.participants.find(p => p.isAi);
 
@@ -80,8 +196,7 @@ const sendMessage = async (req, res) => {
         text: msg.text
       }));
 
-      // Generate AI response in background
-      // To ensure responsiveness, we can generate it immediately
+      // Generate AI response
       try {
         const aiReplyText = await generateResponse(text, geminiHistory);
         const aiTranslations = await translateMessage(aiReplyText);
@@ -110,7 +225,6 @@ const sendMessage = async (req, res) => {
         }
       } catch (aiError) {
         console.error('AI Processing Error:', aiError);
-        // If AI generation fails, send error/fallback message
         let fallbackMessage = await Message.create({
           conversation: conversationId,
           sender: aiParticipant._id,
@@ -122,8 +236,6 @@ const sendMessage = async (req, res) => {
         }
       }
     }
-
-    res.status(201).json({ success: true, data: message });
   } catch (error) {
     console.error('Send Message Error:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -152,7 +264,6 @@ const getMessages = async (req, res) => {
 const markRead = async (req, res) => {
   try {
     const { conversationId } = req.params;
-    // Update all messages in this conversation where the user hasn't read yet
     await Message.updateMany(
       {
         conversation: conversationId,
@@ -173,7 +284,6 @@ const markRead = async (req, res) => {
 // @access  Private
 const getUnreadCounts = async (req, res) => {
   try {
-    // Find all conversations the user participates in
     const conversations = await Conversation.find({
       participants: { $elemMatch: { $eq: req.user._id } },
     });
@@ -202,4 +312,5 @@ module.exports = {
   getMessages,
   markRead,
   getUnreadCounts,
+  processAsyncToxicity,
 };

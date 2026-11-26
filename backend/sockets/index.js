@@ -41,6 +41,9 @@ const initSockets = (io) => {
     }
     activeConnections[userId].push(socket.id);
 
+    // Automatically join private user room for targeted notifications & alerts
+    socket.join(`user_${userId}`);
+
     // Update user's online status in DB
     try {
       await User.findByIdAndUpdate(userId, { isOnline: true, lastSeen: Date.now() });

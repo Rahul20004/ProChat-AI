@@ -20,6 +20,7 @@ const messageRoutes = require('./routes/message.routes');
 const conversationRoutes = require('./routes/conversation.routes');
 const aiRoutes = require('./routes/ai.routes');
 const analyticsRoutes = require('./routes/analytics.routes');
+const notificationRoutes = require('./routes/notification.routes');
 
 // ─── Global crash catchers (catch ANY unhandled error before it kills the process) ───
 process.on('uncaughtException', (err) => {
@@ -85,6 +86,7 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/api/ai', aiRoutes);
 app.use('/ai', aiRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // Base Route
 app.get('/', (req, res) => {

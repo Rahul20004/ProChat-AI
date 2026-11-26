@@ -30,6 +30,23 @@ const messageSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    toxicityCategory: {
+      type: String,
+      default: '',
+    },
+    toxicitySeverity: {
+      type: String,
+      enum: ['Low', 'Medium', 'High', 'None'],
+      default: 'None',
+    },
+    toxicityConfidence: {
+      type: Number,
+      default: 0,
+    },
+    toxicityReason: {
+      type: String,
+      default: '',
+    },
     readBy: [
       {
         type: mongoose.Schema.Types.ObjectId,

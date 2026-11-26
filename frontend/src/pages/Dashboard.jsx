@@ -21,11 +21,13 @@ import {
   IoSparkles,
   IoClose,
 } from 'react-icons/io5';
-import { Reply } from 'lucide-react';
+import { Reply, Bell, ShieldAlert } from 'lucide-react';
 import Toast from '../components/Toast';
 import ContextMenu from '../components/ContextMenu';
 import TranslateModal from '../components/TranslateModal';
 import SummarizeModal from '../components/SummarizeModal';
+import NotificationCenter from '../components/NotificationCenter';
+import SafetyAlertToast from '../components/SafetyAlertToast';
 
 const Dashboard = () => {
   const { user, logout } = useAuth();
@@ -78,6 +80,13 @@ const Dashboard = () => {
   });
   const [replyToMessage, setReplyToMessage] = useState(null);
 
+  // Safety Notifications States
+  const [notifications, setNotifications] = useState([]);
+  const [unreadNotifCount, setUnreadNotifCount] = useState(0);
+  const [isNotificationCenterOpen, setIsNotificationCenterOpen] = useState(false);
+  const [safetyAlertNotif, setSafetyAlertNotif] = useState(null);
+  const [highlightedMessageId, setHighlightedMessageId] = useState(null);
+
   // Refs
   const recognitionRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -86,13 +95,57 @@ const Dashboard = () => {
   const touchStartPosRef = useRef({ x: 0, y: 0 });
   const messageInputRef = useRef(null);
 
+  // ─── Fetch Safety Notifications ─────────────────────────────────────────────
+  const fetchNotifications = useCallback(async () => {
+    try {
+      const { data } = await API.get('/notifications');
+      if (data && data.success) {
+        setNotifications(data.data || []);
+        setUnreadNotifCount(data.unreadCount || 0);
+      }
+    } catch (err) {
+      console.error('Failed to fetch notifications:', err);
+    }
+  }, []);
+
   // ─── Initial Data Load ───────────────────────────────────────────────────────
   useEffect(() => {
     fetchConversations();
     fetchAllUsers();
     fetchAiAssistant();
     fetchUnreadCounts();
-  }, []);
+    fetchNotifications();
+  }, [fetchNotifications]);
+
+  // ─── Real-Time Safety Alerts Socket Listener ────────────────────────────────
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleToxicNotification = (newNotif) => {
+      console.log('Safety Alert received:', newNotif);
+      setSafetyAlertNotif(newNotif);
+      setNotifications((prev) => [newNotif, ...prev]);
+      setUnreadNotifCount((prev) => prev + 1);
+    };
+
+    const handleMessageToxicityUpdated = ({ messageId, isToxic, toxicityCategory, toxicitySeverity, toxicityReason }) => {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg._id === messageId
+            ? { ...msg, isToxic, toxicityCategory, toxicitySeverity, toxicityReason }
+            : msg
+        )
+      );
+    };
+
+    socket.on('toxic_notification', handleToxicNotification);
+    socket.on('message_toxicity_updated', handleMessageToxicityUpdated);
+
+    return () => {
+      socket.off('toxic_notification', handleToxicNotification);
+      socket.off('message_toxicity_updated', handleMessageToxicityUpdated);
+    };
+  }, [socket]);
 
   // ─── Global Socket listener for new messages (unread count updates) ──────────
   useEffect(() => {
@@ -537,6 +590,41 @@ const Dashboard = () => {
     }, 50);
   };
 
+  const handleViewMessage = (notification) => {
+    const targetConvId = notification.conversation?._id || notification.conversation;
+    const targetMsgId = notification.message?._id || notification.message;
+
+    // 1. If not currently viewing the target conversation, switch to it
+    if (!activeChat || activeChat._id !== targetConvId) {
+      const conv = conversations.find((c) => c._id === targetConvId);
+      if (conv) {
+        setActiveChat(conv);
+      }
+    }
+
+    // 2. Set highlighted message ID
+    setHighlightedMessageId(targetMsgId);
+
+    // 3. Close notification center if open
+    setIsNotificationCenterOpen(false);
+
+    // 4. Scroll to message with retry to allow rendering if conversation just loaded
+    const attemptScroll = (attempts = 0) => {
+      const el = document.getElementById(`message-${targetMsgId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else if (attempts < 8) {
+        setTimeout(() => attemptScroll(attempts + 1), 200);
+      }
+    };
+    attemptScroll();
+
+    // 5. Clear highlight after 4.5 seconds
+    setTimeout(() => {
+      setHighlightedMessageId(null);
+    }, 4500);
+  };
+
   const getParticipantDetails = (chat) => {
     if (!chat) return null;
     return chat.participants.find((p) => p._id !== user._id) || chat.participants[0];
@@ -597,6 +685,18 @@ const Dashboard = () => {
           </div>
 
           <div className="flex items-center gap-1">
+            <button
+              onClick={() => setIsNotificationCenterOpen(true)}
+              title="Safety Notifications"
+              className="relative p-2 text-chatMuted hover:text-white rounded-full hover:bg-chatActive transition-all"
+            >
+              <Bell className="h-5 w-5" />
+              {unreadNotifCount > 0 && (
+                <span className="absolute top-1 right-1 flex h-4 w-4 items-center justify-center rounded-full bg-rose-500 text-[9px] font-bold text-white shadow-sm ring-2 ring-chatSidebar animate-pulse">
+                  {unreadNotifCount > 9 ? '9+' : unreadNotifCount}
+                </span>
+              )}
+            </button>
             <button
               onClick={() => navigate('/analytics')}
               title="AI Dashboard"
@@ -1009,6 +1109,7 @@ const Dashboard = () => {
                     )}
 
                     <div
+                      id={`message-${msg._id}`}
                       onContextMenu={(e) => handleMessageContextMenu(e, msg)}
                       onTouchStart={(e) => handleMessageTouchStart(e, msg)}
                       onTouchMove={handleMessageTouchMove}
@@ -1019,8 +1120,29 @@ const Dashboard = () => {
                           : msg.sender?.isAi
                           ? 'bg-gradient-to-br from-chatBubbleOther to-chatActive/50 text-chatText rounded-tl-sm border border-chatAccent/10 hover:border-chatAccent/30'
                           : 'bg-chatBubbleOther text-chatText rounded-tl-sm hover:brightness-105'
+                      } ${
+                        highlightedMessageId === msg._id
+                          ? 'ring-2 ring-rose-500 shadow-[0_0_25px_rgba(244,63,94,0.45)] scale-[1.01]'
+                          : ''
+                      } ${
+                        msg.isToxic && !isSelf
+                          ? 'border border-rose-500/40 bg-gradient-to-br from-rose-950/20 to-chatBubbleOther'
+                          : ''
                       }`}
                     >
+                      {/* Flagged Toxic Badge */}
+                      {msg.isToxic && !isSelf && (
+                        <div className="flex items-center gap-1.5 text-[10px] text-rose-400 font-semibold mb-1 pb-1 border-b border-rose-500/20">
+                          <ShieldAlert className="w-3.5 h-3.5 text-rose-400 flex-shrink-0" />
+                          <span>Flagged: {msg.toxicityCategory || 'Harmful content'}</span>
+                          {msg.toxicitySeverity && msg.toxicitySeverity !== 'None' && (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-rose-500/20 uppercase font-bold text-rose-300">
+                              {msg.toxicitySeverity}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
                       {/* Context menu trigger button on hover */}
                       <button
                         type="button"
@@ -1242,6 +1364,26 @@ const Dashboard = () => {
         onClose={() => setSummarizeModal({ isOpen: false, message: null })}
         onShowToast={showToast}
       />
+
+      {/* ──── Safety Notification Center ──── */}
+      <NotificationCenter
+        isOpen={isNotificationCenterOpen}
+        onClose={() => setIsNotificationCenterOpen(false)}
+        onViewMessage={handleViewMessage}
+        onShowToast={showToast}
+        notifications={notifications}
+        unreadCount={unreadNotifCount}
+        onRefresh={fetchNotifications}
+      />
+
+      {/* ──── Real-Time Safety Alert Toast ──── */}
+      {safetyAlertNotif && (
+        <SafetyAlertToast
+          notification={safetyAlertNotif}
+          onClose={() => setSafetyAlertNotif(null)}
+          onViewMessage={handleViewMessage}
+        />
+      )}
 
       {/* ──── Toast Notifications ──── */}
       {toast && (
