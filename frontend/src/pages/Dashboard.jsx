@@ -97,6 +97,7 @@ const Dashboard = () => {
 
   // Refs
   const recognitionRef = useRef(null);
+  const isRecordingRef = useRef(false);
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const touchTimerRef = useRef(null);
@@ -278,6 +279,9 @@ const Dashboard = () => {
       recognition.lang = 'en-US';
 
       recognition.onresult = (event) => {
+        // Race condition guard: ignore speech results if recording was stopped
+        if (!isRecordingRef.current) return;
+
         let transcript = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
           transcript += event.results[i][0].transcript;
@@ -287,16 +291,30 @@ const Dashboard = () => {
 
       recognition.onerror = (event) => {
         console.error('Speech recognition error:', event.error);
+        isRecordingRef.current = false;
         setIsRecording(false);
-        showToast('Speech recognition error: ' + event.error, 'error');
+        // Do not display toast when recording was purposefully aborted on send or timed out on no speech
+        if (event.error !== 'aborted' && event.error !== 'no-speech') {
+          showToast('Speech recognition error: ' + event.error, 'error');
+        }
       };
 
       recognition.onend = () => {
+        isRecordingRef.current = false;
         setIsRecording(false);
       };
 
       recognitionRef.current = recognition;
     }
+
+    return () => {
+      isRecordingRef.current = false;
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch (e) {}
+      }
+    };
   }, []);
 
   // ─── Helper Functions ────────────────────────────────────────────────────────
@@ -427,9 +445,33 @@ const Dashboard = () => {
     markConversationRead(chat._id);
   };
 
+  const stopRecording = useCallback(() => {
+    isRecordingRef.current = false;
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.abort();
+      } catch (e) {
+        try {
+          recognitionRef.current.stop();
+        } catch (err) {}
+      }
+    }
+    setIsRecording(false);
+  }, []);
+
+  // Automatically halt speech recognition when switching conversations
+  useEffect(() => {
+    if (isRecordingRef.current) {
+      stopRecording();
+    }
+  }, [activeChat?._id, stopRecording]);
+
   const handleSend = async (textToSend) => {
     let text = textToSend || inputText;
     if (!text.trim() || !activeChat || isSending) return;
+
+    // Immediately stop active voice-to-text recording session upon sending
+    stopRecording();
 
     // Capture the target reply ID and reset reply bar
     const replyId = replyToMessage ? replyToMessage._id : null;
@@ -494,12 +536,18 @@ const Dashboard = () => {
       return;
     }
 
-    if (isRecording) {
-      recognitionRef.current.stop();
-      setIsRecording(false);
+    if (isRecordingRef.current) {
+      stopRecording();
     } else {
-      setIsRecording(true);
-      recognitionRef.current.start();
+      try {
+        isRecordingRef.current = true;
+        setIsRecording(true);
+        recognitionRef.current.start();
+      } catch (err) {
+        console.error('Error starting speech recognition:', err);
+        isRecordingRef.current = false;
+        setIsRecording(false);
+      }
     }
   };
 
