@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
@@ -380,6 +380,18 @@ const Dashboard = () => {
 
   const startConversation = async (recipientId) => {
     try {
+      // Check if conversation already exists in loaded conversations
+      const existingConv = conversations.find((c) =>
+        c.participants?.some((p) => (p._id || p).toString() === recipientId.toString())
+      );
+      if (existingConv) {
+        openChat(existingConv);
+        setSearchTerm('');
+        setIsSearching(false);
+        setMobileSidebarOpen(false);
+        return;
+      }
+
       const { data } = await API.post('/conversations', { recipientId });
       setActiveChat(data.data);
       setSearchTerm('');
@@ -654,6 +666,18 @@ const Dashboard = () => {
     ? searchResults
     : allUsers;
 
+  // ─── Filtered conversations for recent chats (excluding AI assistant) ───────
+  const recentUserChats = useMemo(() => {
+    return conversations.filter((chat) => {
+      const participant = getParticipantDetails(chat);
+      if (!participant) return false;
+      const isAi =
+        participant.isAi === true ||
+        (aiAssistant && (participant._id || participant).toString() === aiAssistant._id?.toString());
+      return !isAi;
+    });
+  }, [conversations, aiAssistant, user]);
+
   // ─── RENDER ──────────────────────────────────────────────────────────────────
 
   return (
@@ -778,7 +802,9 @@ const Dashboard = () => {
                 <div className="px-2 pt-2 pb-1">
                   <div
                     onClick={() => startConversation(aiAssistant._id)}
-                    className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all group hover:bg-chatActive/80 bg-gradient-to-r from-chatAccent/5 to-transparent border border-chatAccent/10 hover:border-chatAccent/30`}
+                    className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all group hover:bg-chatActive/80 bg-gradient-to-r from-chatAccent/5 to-transparent border border-chatAccent/10 hover:border-chatAccent/30 ${
+                      activeChat && getParticipantDetails(activeChat)?.isAi ? 'bg-chatActive border-chatAccent/30 shadow-sm' : ''
+                    }`}
                   >
                     <div className="relative">
                       <img
@@ -802,7 +828,7 @@ const Dashboard = () => {
               )}
 
               {/* Separator */}
-              {conversations.length > 0 && (
+              {recentUserChats.length > 0 && (
                 <div className="px-4 pt-2 pb-1">
                   <span className="text-[10px] font-semibold text-chatMuted uppercase tracking-widest">
                     Recent Chats
@@ -850,8 +876,8 @@ const Dashboard = () => {
                 </div>
               ) : (
                 <>
-                  {conversations.length > 0 ? (
-                    conversations.map((chat) => {
+                  {recentUserChats.length > 0 ? (
+                    recentUserChats.map((chat) => {
                       const participant = getParticipantDetails(chat);
                       if (!participant) return null;
                       const isOnline = isUserOnline(participant._id) || participant.isAi;
