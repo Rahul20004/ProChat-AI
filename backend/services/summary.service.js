@@ -34,10 +34,43 @@ const generateSummary = async (messages = []) => {
           })
           .join('\n');
 
-        const prompt = `Below is a real-time conversation between users. Summarize this conversation, capturing the core topics discussed, any decisions reached, and any action items. Keep the summary under 150 words and present it professionally in clear bullet points or a short paragraph.
+        const prompt = `You are an expert conversation analyst. Analyze the following real-time chat between users and generate a clear, highly accurate, structured summary.
 
 Conversation log:
-${conversationLog}`;
+${conversationLog}
+
+Your task:
+Analyze the conversation and provide a structured summary adhering strictly to the guidelines below.
+
+Output format (use this exact structure):
+Overview:
+[2-3 sentences summarizing the conversation, distinguishing casual banter from technical discussions. Use natural, concise language without repetitive phrases.]
+
+Key Topics:
+- [Important subject or topic discussed]
+- [Another topic if relevant]
+
+Decisions:
+- [Actual decision or consensus reached by the participants]
+
+Action Items:
+- [Concrete task, follow-up, or commitment explicitly agreed to]
+
+Important Messages:
+- [Critical technical detail, credential, deadline, or notable message needing attention]
+
+Strict Rules & Constraints:
+1. Summarize ONLY the messages provided. Do not extrapolate, assume, or invent events, tasks, decisions, or conclusions.
+2. Distinguish casual chat from technical discussions. Never treat casual greetings, jokes, or chit-chat as formal or professional meetings.
+3. Do NOT invent professional decisions or action items for casual conversations.
+4. Avoid unnecessarily mentioning arguments, hostile remarks, or deleted messages unless they are genuinely central to the conversation context.
+5. Preserve important technical details (e.g. language, library names, architectures, error codes) accurately.
+6. Identify actual tasks or commitments ONLY when explicitly discussed by the participants.
+7. Avoid repetitive sentences. Use concise, natural, and easy-to-understand language.
+8. CRITICAL: If no decisions were made, completely omit the "Decisions:" heading and section. Do NOT write "None" or "N/A".
+9. CRITICAL: If no action items or commitments were made, completely omit the "Action Items:" heading and section. Do NOT write "None" or "N/A".
+10. CRITICAL: If no important messages need attention, completely omit the "Important Messages:" heading and section. Do NOT write "None" or "N/A".
+11. Do NOT wrap the output in markdown code blocks (\`\`\`). Do NOT include raw asterisks around section headers.`;
 
         const result = await model.generateContent(prompt);
         const text = result.response.text().trim();

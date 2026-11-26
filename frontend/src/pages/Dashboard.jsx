@@ -1183,10 +1183,10 @@ const Dashboard = () => {
                   onClick={handleSummarize}
                   disabled={isSummaryLoading}
                   title="Generate AI Summary"
-                  className="hidden sm:flex items-center gap-1 px-3 py-1.5 rounded-xl border border-chatBorder text-xs text-chatAccent bg-chatSidebar hover:bg-chatActive font-medium transition-all disabled:opacity-50"
+                  className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border border-chatBorder text-xs text-chatAccent bg-chatSidebar hover:bg-chatActive font-medium transition-all disabled:opacity-50"
                 >
                   <IoDocumentTextOutline className="h-4 w-4" />
-                  {isSummaryLoading ? 'Summarizing...' : 'Summarize'}
+                  <span className="hidden xs:inline">{isSummaryLoading ? 'Summarizing...' : 'Summarize'}</span>
                 </button>
               </div>
             </div>
