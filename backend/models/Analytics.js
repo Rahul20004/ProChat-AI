@@ -96,6 +96,22 @@ const analyticsSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    aiFeatureTranslationCount: {
+      type: Number,
+      default: 0,
+    },
+    aiFeatureSummarizationCount: {
+      type: Number,
+      default: 0,
+    },
+    aiFeatureSmartReplyCount: {
+      type: Number,
+      default: 0,
+    },
+    aiFeatureToxicityCount: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true,
